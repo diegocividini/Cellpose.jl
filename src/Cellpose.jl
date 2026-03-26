@@ -69,6 +69,13 @@ function segment(img::AbstractArray, model_path::String)
         img_padded = zeros(eltype(img), H_pad, W_pad, C)
         img_padded[1:H, 1:W, :] .= img
     end
+
+    println("1.5 Normalizzazione globale dell'immagine...")
+    if ndims(img) == 2
+        img_padded = normalize99(img_padded) # Sovrascriviamo con i valori 0-1
+    else
+        img_padded = normalize99(img_padded) 
+    end
     
     y_starts = collect(1:STRIDE:max(1, H_pad - TILE_SIZE + 1))
     if y_starts[end] != H_pad - TILE_SIZE + 1
@@ -86,32 +93,32 @@ function segment(img::AbstractArray, model_path::String)
     cellprob_full = zeros(Float32, H_pad, W_pad)
     weight_sum = zeros(Float32, H_pad, W_pad)
     
-    # Finestra Bilineare
     w1 = Float32[min(i, TILE_SIZE - i + 1) for i in 1:TILE_SIZE]
     window = w1 .* w1'
     
-    println("2. Esecuzione Inferenza su $total_tiles riquadri (con sovrapposizione bilineare)...")
-    println("   (Nota: impiegherà più tempo per via della precisione extra)")
+    println("2. Esecuzione Inferenza su $total_tiles riquadri (Multithreading)...")
     
-    tile_count = 0
-    for y_start in y_starts
-        for x_start in x_starts
-            tile_count += 1
-            y_end = y_start + TILE_SIZE - 1
-            x_end = x_start + TILE_SIZE - 1
-            
-            if ndims(img_padded) == 2
-                tile = img_padded[y_start:y_end, x_start:x_end]
-            else
-                tile = img_padded[y_start:y_end, x_start:x_end, :]
-            end
-            
-            tile_norm = normalize99(tile)
-            input_tensor = prepare_tensor(tile_norm)
-            
-            outputs = model(Dict("input_image" => input_tensor))
-            out_tensor = outputs["flows_and_probs"]
-            
+    stitching_lock = ReentrantLock()
+    
+    tiles_coords = [(y, x) for y in y_starts for x in x_starts]
+    
+    # 3. La MAGIA DI JULIA: @threads distribuisce automaticamente il lavoro sui core del Mac!
+    Threads.@threads for (y_start, x_start) in tiles_coords
+        y_end = y_start + TILE_SIZE - 1
+        x_end = x_start + TILE_SIZE - 1
+        
+        if ndims(img_padded) == 2
+            tile = img_padded[y_start:y_end, x_start:x_end]
+        else
+            tile = img_padded[y_start:y_end, x_start:x_end, :]
+        end
+        
+        input_tensor = prepare_tensor(tile)
+        
+        outputs = model(Dict("input_image" => input_tensor))
+        out_tensor = outputs["flows_and_probs"]
+        
+        lock(stitching_lock) do
             cellprob_full[y_start:y_end, x_start:x_end] .+= out_tensor[1, 1, :, :] .* window
             dP_full[1, y_start:y_end, x_start:x_end] .+= out_tensor[1, 2, :, :] .* window
             dP_full[2, y_start:y_end, x_start:x_end] .+= out_tensor[1, 3, :, :] .* window
