@@ -7,6 +7,13 @@ include("Dynamics.jl")
 
 export normalize99, prepare_tensor, segment, compute_masks
 
+"""
+    normalize99(img::AbstractArray)
+
+    Normalizes the input image (img) by scaling its pixel values based on the 1st and 99th percentiles. 
+    For grayscale images (2D), it applies the same normalization to all pixels. 
+    For RGB images (3D), it normalizes each channel independently, ensuring that the color information is preserved while enhancing contrast.
+"""
 function normalize99(img::AbstractArray)
     out = zeros(Float32, size(img))
     if ndims(img) == 2
@@ -16,7 +23,7 @@ function normalize99(img::AbstractArray)
             out .= (img .- p1) ./ (p99 - p1)
         end
     elseif ndims(img) == 3
-        # Normalizzazione indipendente per ogni canale RGB!
+        # Normalize each channel independently
         for c in 1:size(img, 3)
             channel_data = vec(img[:, :, c])
             p1 = quantile(channel_data, 0.01)
@@ -32,8 +39,10 @@ end
 """
     prepare_tensor(tile_norm::AbstractArray)
 
-Se è a colori (3D), passa i canali R, G, B direttamente alla rete.
-Se è in scala di grigi (2D), clona il grigio su 3 canali.
+    Prepares the normalized tile (tile_norm) for input into the ONNX model.
+    For grayscale images (2D), it replicates the single channel into three channels to create a 4D tensor of shape (1, 3, H, W).
+    For RGB images (3D), it rearranges the dimensions to create a 4D tensor of shape (1, 3, H, W) while preserving the color information.
+    This function ensures that the input data is in the correct format expected by the ONNX model, facilitating accurate inference.
 """
 function prepare_tensor(tile_norm::AbstractArray)
     if ndims(tile_norm) == 2
@@ -51,10 +60,16 @@ function prepare_tensor(tile_norm::AbstractArray)
         end
         return tensor
     else
-        error("Formato immagine non supportato")
+        error("Image format not supported. Expected 2D (grayscale) or 3D (RGB) array.")
     end
 end
 
+"""
+    pad_reflect(img::AbstractArray, pad_h::Int, pad_w::Int)
+    Pads the input image (img) by reflecting its borders.
+    This function is used to ensure that the input image meets the minimum size requirements for processing, while avoiding the introduction of artificial borders that could affect the segmentation results.
+    The padding is applied by reflecting the pixel values at the borders of the image, creating a seamless extension that preserves the natural structure of the image.
+"""
 function pad_reflect(img::AbstractArray, pad_h::Int, pad_w::Int)
     H, W = size(img)[1:2]
     if ndims(img) == 2
@@ -76,22 +91,22 @@ end
 """
     segment(img::AbstractArray, model_path::String)
 
-Pipeline nativa con replica esatta di Cellpose v4 (cpsam).
+    Native pipeline that replicates exactly Cellpose v4 (cpsam).
 """
 function segment(img::AbstractArray, model_path::String)
-    println("1. Inizializzazione modello ONNX...")
+    println("1. ONNX model initialization")
     model = load_inference(model_path)
     
     TILE_SIZE = 256
     TILE_OVERLAP = 0.1 # 10% overlap 
     STRIDE = round(Int, TILE_SIZE * (1.0 - TILE_OVERLAP)) # 230 pixel
     
-    println("1.5 Normalizzazione globale dell'immagine (per canale)...")
+    println("1.5 Global image normalization (per channel)")
     img_norm = normalize99(img)
     
     H, W = size(img_norm)[1:2]
     
-    # Pad solo se l'immagine è più piccola di 256x256 (nel tuo caso non farà nulla)
+    # Pad only if the image is smaller than the tile size (256x256)
     pad_h = max(0, TILE_SIZE - H)
     pad_w = max(0, TILE_SIZE - W)
     
@@ -119,7 +134,7 @@ function segment(img::AbstractArray, model_path::String)
     cellprob_full = zeros(Float32, H_pad, W_pad)
     weight_sum = zeros(Float32, H_pad, W_pad)
     
-    # Finestra A Tetto Piatto (Esatta)
+    # Precompute the blending window (tapering) to apply to each tile's output for smooth stitching
     tap = Float32.(abs.(range(-1.0, 1.0, length=TILE_SIZE)))
     tap .= 1.0f0 .- tap
     for i in 1:TILE_SIZE
@@ -131,7 +146,7 @@ function segment(img::AbstractArray, model_path::String)
     end
     window = tap .* tap'
     
-    println("2. Esecuzione Inferenza su $total_tiles riquadri (Multithreading)...")
+    println("2. Executing inference on $total_tiles tiles (Multithreading)...")
     
     stitching_lock = ReentrantLock()
     tiles_coords = [(y, x) for y in y_starts for x in x_starts]
@@ -159,7 +174,7 @@ function segment(img::AbstractArray, model_path::String)
         end
     end
     
-    println("3. Normalizzazione dei bordi e Crop finale...")
+    println("3. Normalizing borders and final cropping")
     weight_sum[weight_sum .== 0] .= 1.0f0
     
     cellprob_full ./= weight_sum
@@ -169,10 +184,10 @@ function segment(img::AbstractArray, model_path::String)
     cellprob_crop = cellprob_full[1:H, 1:W]
     dP_crop = dP_full[:, 1:H, 1:W]
     
-    println("4. Calcolo Dinamica dei fluidi (Euler Integration)...")
+    println("4. Dynamic calculation of flows (Euler Integration)...")
     masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=0.0, flow_threshold=0.4)
     
-    println("Completato! Trovate $(maximum(masks)) cellule.")
+    println("Completed! Found $(maximum(masks)) cells.")
     return masks
 end
 

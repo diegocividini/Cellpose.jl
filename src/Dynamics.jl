@@ -1,15 +1,18 @@
-# src/Dynamics.jl
+### Dynamics.jl
 
 """
     follow_flows(dP::AbstractArray{T, 3}; niter::Int=200)
 
-Simula il movimento dei pixel seguendo i gradienti (dP) per `niter` iterazioni.
-È l'implementazione Julia dell'integrazione di Eulero di Cellpose.
+    It takes the predicted flows (dP) and iteratively moves each pixel 
+    according to these flows for a specified number of iterations (niter).
+    
+        The output is a new set of coordinates (p) that represent the final positions 
+    of each pixel after following the flows.
 """
 function follow_flows(dP::AbstractArray{T, 3}; niter::Int=200) where T
     _, H, W = size(dP)
     
-    # Inizializziamo la griglia delle coordinate di partenza
+    # Initializing the coordinates of the starting points (p) for each pixel
     p = zeros(Float32, 2, H, W)
     p_new = zeros(Float32, 2, H, W)
     
@@ -18,22 +21,22 @@ function follow_flows(dP::AbstractArray{T, 3}; niter::Int=200) where T
         p[2, y, x] = x
     end
     
-    # Integrazione: muoviamo ogni punto lungo il campo vettoriale
+    # Moving each point according to the flow vectors for niter iterations, using the nearest neighbor approach
     for i in 1:niter
         for x in 1:W, y in 1:H
             py = p[1, y, x]
             px = p[2, y, x]
             
-            # Arrotondiamo per trovare l'indice della matrice del gradiente
+            # Rounding to the nearest pixel to get the flow vector at that location
             y_idx = clamp(round(Int, py), 1, H)
             x_idx = clamp(round(Int, px), 1, W)
             
-            # Aggiorniamo la posizione sommando il vettore direzionale
+            # Updating the position of the pixel according to the flow vector
             p_new[1, y, x] = py + dP[1, y_idx, x_idx]
             p_new[2, y, x] = px + dP[2, y_idx, x_idx]
         end
         
-        # Scambiamo i buffer per l'iterazione successiva (molto efficiente in memoria)
+        # Swapping the buffers for the next iteration (high memory efficiency)
         temp = p
         p = p_new
         p_new = temp
@@ -45,18 +48,23 @@ end
 """
     compute_masks(dP, cellprob; niter=200, cellprob_threshold=0.0)
 
-Prende i flussi e le probabilità, traccia i pixel e genera le maschere delle cellule.
+    1. Moves each pixel towards the center of the cells by following the flow vectors (dP) for niter iterations.
+    2. Creates a histogram of the final positions of the pixels that exceed the cell probability threshold (cellprob_threshold).
+    3. Identifies local "peaks" in the histogram that represent the centers of the cells.
+    4. Expands the identified centers by 5 pixels to merge scattered groups of pixels belonging to the same cell.
+    5. Assigns a mask ID to each pixel based on the center it is associated with.
+    6. Applies error and size filters to remove invalid masks.
 """
 function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T}; 
-                       niter::Int=200, cellprob_threshold::Float64=0.0, flow_threshold::Float64=0.4) where T
+                        niter::Int=200, cellprob_threshold::Float64=0.0, flow_threshold::Float64=0.4) where T
     
-    # 1. Spostiamo i pixel verso il centro delle cellule
+    # 1. Moving each pixel according to the flow vectors (dP) for niter iterations
     p = follow_flows(dP, niter=niter)
     
     H, W = size(cellprob)
     iscell = cellprob .> cellprob_threshold
     
-    # 2. Creiamo l'istogramma delle posizioni finali
+    # 2. Creates the histogram of the final positions
     hist = zeros(Int32, H, W)
     for x in 1:W, y in 1:H
         if iscell[y, x]
@@ -66,7 +74,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         end
     end
     
-    # 3. Troviamo i "picchi" locali (i centri) che hanno più di 10 pixel
+    # 3. Identifies local "peaks" (the centers) that have more than 10 pixels
     seeds = Vector{Tuple{Int, Int, Int32}}()
     current_id = Int32(1)
     for x in 1:W, y in 1:H
@@ -89,7 +97,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         end
     end
     
-    # 4. Espandiamo i centri di 5 pixel per accorpare i mucchi sparsi
+    # 4. Expands the identified centers by 5 pixels to merge scattered groups of pixels belonging to the same cell
     grid = zeros(Int32, H, W)
     for (sy, sx, id) in seeds
         for dx in -5:5, dy in -5:5
@@ -100,7 +108,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         end
     end
     
-    # 5. Assegniamo l'ID finale della maschera
+    # 5. Assigns a mask ID to each pixel based on the center it is associated with
     masks = zeros(Int32, H, W)
     for x in 1:W, y in 1:H
         if iscell[y, x]
@@ -110,7 +118,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         end
     end
     
-    # 6. Filtri di errore e grandezza
+    # 6. Applies error and size filters to remove invalid masks
     if flow_threshold > 0.0
         remove_bad_flow_masks!(masks, dP; threshold=flow_threshold)
     end
@@ -122,11 +130,12 @@ end
 """
     remove_small_masks!(masks::AbstractMatrix{<:Integer}; min_size::Int=15)
 
-Elimina le maschere (cellule) che hanno un'area inferiore a `min_size` pixel.
-Riordina gli ID rimanenti in modo che siano contigui da 1 a N.
+    It deletes masks (cells) that have an area smaller than `min_size` pixels.
+    It then reorders the remaining IDs so that they are contiguous from 1 to N.
+    This replicates the logic of `remove_small_masks` in Cellpose.
 """
 function remove_small_masks!(masks::AbstractMatrix{<:Integer}; min_size::Int=15)
-    # 1. Contiamo quanto è grande ogni cellula
+    # 1. Using a dict to count the size of each mask (cell)
     sizes = Dict{Int, Int}()
     for val in masks
         if val > 0
@@ -134,8 +143,7 @@ function remove_small_masks!(masks::AbstractMatrix{<:Integer}; min_size::Int=15)
         end
     end
     
-    # 2. Creiamo una mappa: ID vecchio -> ID nuovo
-    # Se la cellula è troppo piccola, il suo nuovo ID sarà 0 (sfondo)
+    # 2. Creating a mapping from old IDs to new IDs, where small masks get ID 0 (background)
     new_ids = Dict{Int, Int}()
     current_id = 1
     for (val, count) in sizes
@@ -147,7 +155,7 @@ function remove_small_masks!(masks::AbstractMatrix{<:Integer}; min_size::Int=15)
         end
     end
     
-    # 3. Applichiamo la mappa all'immagine
+    # 3. Applying the new IDs to the masks
     for i in eachindex(masks)
         val = masks[i]
         if val > 0
@@ -161,9 +169,8 @@ end
 """
     masks_to_flows(masks::AbstractMatrix{<:Integer})
 
-Calcola i flussi teorici (ideali) a partire dalle maschere 2D.
-Replica la funzione `masks_to_flows_gpu` e `_extend_centers_gpu` di Cellpose 
-usando la diffusione del calore.
+    Calculates the theoretical (ideal) flows from 2D masks.
+    It replicates the logic of `masks_to_flows_gpu` and `_extend_centers_gpu` in Cellpose using heat diffusion.
 """
 function masks_to_flows(masks::AbstractMatrix{<:Integer})
     H, W = size(masks)
@@ -175,7 +182,6 @@ function masks_to_flows(masks::AbstractMatrix{<:Integer})
         return mu
     end
     
-    # OTTIMIZZAZIONE: Raccogliamo solo le coordinate dei pixel validi
     valid_pixels = Tuple{Int, Int, Int}[] 
     coords_dict = Dict{Int, Vector{Tuple{Int, Int}}}()
     
@@ -190,7 +196,7 @@ function masks_to_flows(masks::AbstractMatrix{<:Integer})
         end
     end
     
-    # 1. Trova il centro di massa
+    # 1. Finding the centers of each mask by calculating the mean position and then selecting the pixel closest to the mean as the center
     centers = fill((0, 0), n_masks)
     for i in 1:n_masks
         if !haskey(coords_dict, i)
@@ -214,7 +220,8 @@ function masks_to_flows(masks::AbstractMatrix{<:Integer})
         centers[i] = center
     end
     
-    # 2. Diffusione del calore SUPER VELOCE (solo sui pixel delle cellule)
+    # 2. Diffusion process to create a "heat map" (T) where the center of the cell 
+    # has the highest value and it decreases as we move away from the center
     n_iter = 200 
     T_new = zeros(Float32, H, W)
     
@@ -238,13 +245,12 @@ function masks_to_flows(masks::AbstractMatrix{<:Integer})
             T_new[y, x] = s / c
         end
         
-        # Scambia i valori 
         for (y, x, m) in valid_pixels
             T[y, x] = T_new[y, x]
         end
     end
     
-    # 3. Calcola i gradienti (derivate spaziali)
+    # 3. Calculating the flow vectors (mu) as the normalized gradient of the heat map (T)
     for (y, x, m) in valid_pixels
         dy = T[y+1, x] - T[y-1, x]
         dx = T[y, x+1] - T[y, x-1]
@@ -259,11 +265,11 @@ end
 """
     remove_bad_flow_masks!(masks, dP; threshold=0.4)
 
-Elimina le maschere il cui flusso teorico non coincide con quello predetto dalla rete.
-Replica esattamente la logica di `remove_bad_flow_masks` e `flow_error`.
+    It deletes masks (cells) whose theoretical flow (calculated from the mask) does not match the flow predicted by the network (dP).
+    It calculates the mean squared error between the theoretical flow and the predicted flow for each mask, and removes those whose error exceeds the specified threshold (default 0.4).
 """
 function remove_bad_flow_masks!(masks::AbstractMatrix{<:Integer}, dP::AbstractArray{<:AbstractFloat, 3}; threshold=0.4)
-    # Calcola i flussi teorici
+    # Calculates the theoretical flow from the masks
     mu = masks_to_flows(masks)
     
     n_masks = maximum(masks)
@@ -272,11 +278,11 @@ function remove_bad_flow_masks!(masks::AbstractMatrix{<:Integer}, dP::AbstractAr
     
     H, W = size(masks)
     
-    # Calcola l'errore quadratico medio per ogni cellula
+    # Calculates the mean squared error for each cell
     for y in 1:H, x in 1:W
         m = masks[y, x]
         if m > 0
-            # Cellpose scala sempre i flussi di rete per 5.0 durante l'inferenza
+            # Cellpose scales the network flows by 5.0 during inference
             dy_net = dP[1, y, x] / 5.0f0
             dx_net = dP[2, y, x] / 5.0f0
             
@@ -295,7 +301,7 @@ function remove_bad_flow_masks!(masks::AbstractMatrix{<:Integer}, dP::AbstractAr
         end
     end
     
-    # Elimina le cellule con errore > threshold (0.4)
+    # Deletes masks whose error exceeds the threshold
     for i in eachindex(masks)
         m = masks[i]
         if m > 0 && errors[m] > threshold
