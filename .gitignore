@@ -1,5 +1,24 @@
-/.venv
-/models
-.log
+# Mac OS
+.DS_Store
+
+# Julia
+*.jl.cov
+*.jl.cs
+*.jl.mem
+deps/deps.jl
+deps/build.log
 Manifest.toml
-/resources
+
+
+models/*.onnx
+models/*.onnx.data
+
+# Dati di test e Tensori (Evita di caricare giga di dati)
+test_data/*.npy
+*.npy
+*.tif
+*.tiff
+
+# File temporanei
+*.swp
+*~
