@@ -68,4 +68,3 @@ This is an independent port built for educational and research integration purpo
 If you use the Cellpose algorithm in your research, please cite their original papers:
 
 > Stringer, C., Wang, T., Michaelos, M., & Pachitariu, M. (2021). Cellpose: a generalist algorithm for cellular anatomy. Nature Methods, 18(1), 100-106.
-
