@@ -1,4 +1,4 @@
-# Cellpose.jl 🔬
+# Cellpose.jl
 
 [![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://github.com/MouseLand/cellpose)
 [![Language](https://img.shields.io/badge/language-Julia-9558B2.svg)](https://julialang.org/)
@@ -7,7 +7,7 @@
 
 This package provides a **pure Julia** pipeline for cellular segmentation using exported ONNX models (like the Vision Transformer-based `cpsam`). It completely bypasses Python interoperability overhead (`PyCall`/`PythonCall`), making it ideal for high-performance, native Julia bio-imaging workflows.
 
-## ✨ Key Features
+## 🚀 Key Features
 
 * **No Python Dependency:** The entire pre-processing, inference, and post-processing pipeline is written in native Julia.
 * **Multithreaded Tiling:** Automatically divides large biomedical images into overlapping patches (256x256) and processes them in parallel across available CPU cores using `Threads.@threads`.
@@ -18,7 +18,23 @@ This package provides a **pure Julia** pipeline for cellular segmentation using 
 * **Custom Dynamics Engine:** The core Euler integration for fluid dynamics (`follow_flows`) and spatial gradient mask recovery (`compute_masks`) have been rewritten and optimized for Julia arrays.
 * **Hardware Acceleration Ready:** Supports GPU inference on NVIDIA hardware via `ONNXRunTime.jl` with a simple flag toggle.
 
-## 🛠 Installation
+## ⚒️ Installation
+
+### 1. Export ONNX model
+
+Due to file size constraints, no pre-trained ONNX models are included in this repository. You must export the cpsam model yourself from the official Cellpose Python package.
+
+Ensure you have the original cellpose and torch packages installed in your Python environment.
+
+Run the provided export script to download the model and convert it to ONNX format:
+
+```Bash
+python scripts/py_to_onnx.py
+```
+
+Move the generated cpsam.onnx (and its .data file, if present) into the `models/` directory of this project.
+
+### 2. Configure the environment
 
 Currently, the package is in development. You can run it locally by cloning the repository and instantiating the Julia environment:
 
@@ -28,7 +44,7 @@ pkg> activate .
 pkg> instantiate
 ```
 
-## 🚀 Quick Start
+## ✨ Quick Start
 
 ```julia
 using Cellpose
@@ -49,17 +65,17 @@ println("Segmentation complete. Found $(maximum(masks)) cells!")
 
 ## 🧠 How it Works (The Pipeline)
 
-1. Global Normalization: The image is normalized per-channel (1st to 99th percentile) to prevent noise hallucinations in empty areas.
+1. **Global Normalization:** The image is normalized per-channel (1st to 99th percentile) to prevent noise hallucinations in empty areas.
 
-2. Overlapping Tiling: The image is divided into 256x256 patches with a 10% overlap (stride of 230 pixels).
+2. **Overlapping Tiling:** The image is divided into `256x256` patches with a 10% overlap (stride of 230 pixels).
 
-3. Parallel Inference: Each patch is formatted to 3 channels and passed through the ONNX network to predict cell probabilities and spatial gradients (dP).
+3. **Parallel Inference:** Each patch is formatted to 3 channels and passed through the ONNX network to predict cell probabilities and spatial gradients (`dP`).
 
-4. Flat-Top Blending: Output patches are stitched back together using a flat-top window to smoothly blend the overlapping borders without edge amplification.
+4. **Flat-Top Blending:** Output patches are stitched back together using a flat-top window to smoothly blend the overlapping borders without edge amplification.
 
-5. Fluid Dynamics: Pixels are treated as particles and pushed along the predicted vector field using Euler integration until they converge at the cell centers.
+5. **Fluid Dynamics:** Pixels are treated as particles and pushed along the predicted vector field using Euler integration until they converge at the cell centers.
 
-6. Quality Control: Small masks (area < 15 pixels) or masks with inconsistent flow fields are automatically rejected.
+6. **Quality Control:** Small masks (area < 15 pixels) or masks with inconsistent flow fields are automatically rejected.
 
 ## 📜 Acknowledgments & Citation
 
