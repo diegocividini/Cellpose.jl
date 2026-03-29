@@ -93,9 +93,14 @@ end
 
     Native pipeline that replicates exactly Cellpose v4 (cpsam).
 """
-function segment(img::AbstractArray, model_path::String)
+function segment(img::AbstractArray, model_path::String, use_gpu::Bool=false)
     println("1. ONNX model initialization")
-    model = load_inference(model_path)
+    if use_gpu
+        println("   --> Activating hardware acceleration (CUDA)...")
+        model = load_inference(model_path, execution_provider=:cuda)
+    else
+        model = load_inference(model_path)
+    end
     
     TILE_SIZE = 256
     TILE_OVERLAP = 0.1 # 10% overlap 

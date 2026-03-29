@@ -8,10 +8,10 @@ pytorch_net = model.net
 pytorch_net.eval()
 pytorch_net = pytorch_net.float()
 
-# La dimensione magica per il positional embedding 32x32 di cpsam è 256x256!
+# cpsam wants a fixed input size of 256x256
 dummy_input = torch.randn(1, 3, 256, 256, dtype=torch.float32) 
 
-# Esportazione in ONNX
+# ONNX export
 torch.onnx.export(
     pytorch_net, 
     dummy_input, 
@@ -23,4 +23,4 @@ torch.onnx.export(
     output_names=['flows_and_probs']
 )
 
-print(f"Modello {model_name} ONNX esportato con successo a 256x256!")
+print(f"Model {model_name} ONNX exported successfully to 256x256!")
