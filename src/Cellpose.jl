@@ -112,7 +112,7 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
         model = load_inference(model_path)
     end
     
-    TILE_SIZE = 224 # Standard Cellpose tile size
+    TILE_SIZE = 256 # Standard Cellpose tile size
     TILE_OVERLAP = 0.1 # 10% overlap between tiles
     STRIDE = round(Int, TILE_SIZE * (1.0 - TILE_OVERLAP)) 
     
