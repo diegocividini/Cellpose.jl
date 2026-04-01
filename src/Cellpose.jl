@@ -2,6 +2,7 @@ module Cellpose
 
 using Statistics
 using ONNXRunTime
+using Images
 
 include("Dynamics.jl")
 
@@ -93,7 +94,7 @@ end
 
     Native pipeline that replicates exactly Cellpose v4 (cpsam).
 """
-function segment(img::AbstractArray, model_path::String, use_gpu::Bool=false)
+function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     println("1. ONNX model initialization")
     if use_gpu
         println("   --> Activating hardware acceleration (CUDA)...")
@@ -194,6 +195,30 @@ function segment(img::AbstractArray, model_path::String, use_gpu::Bool=false)
     
     println("Completed! Found $(maximum(masks)) cells.")
     return masks
+end
+
+"""
+    segment(img_path::String, model_path::String; use_gpu::Bool=false)
+
+    Wrapper function that allows users to input an image file path directly.
+    This function loads the image from the specified path, applies the necessary preprocessing to convert it into a format suitable for the ONNX model, and then calls the main `segment` function to perform the segmentation.
+    It supports both grayscale and RGB images, ensuring that the input data is correctly formatted for the segmentation pipeline while providing a user-friendly interface for loading images from disk.
+"""
+function segment(img_path::String, model_path::String; use_gpu::Bool=false)
+    println("Caricamento immagine da: $img_path ...")
+    raw_img = load(img_path)
+    
+    # Converte l'immagine in matrici Float32 digeribili dalla rete neurale
+    if eltype(raw_img) <: Colorant
+        # Se è a colori (RGB), srotola i canali e riordina le dimensioni
+        img_data = Float32.(permutedims(channelview(raw_img), (2, 3, 1)))
+    else
+        # Se è in scala di grigi
+        img_data = Float32.(raw_img)
+    end
+    
+    # Chiama la TUA funzione segment originale (quella vera con gli Array)
+    return segment(img_data, model_path; use_gpu=use_gpu)
 end
 
 end # module
