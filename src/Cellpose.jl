@@ -46,23 +46,33 @@ end
     This function ensures that the input data is in the correct format expected by the ONNX model, facilitating accurate inference.
 """
 function prepare_tensor(tile_norm::AbstractArray)
+    H, W = size(tile_norm)[1:2]
+    
+    # 1. Initialize a tensor of zeros with the shape (1, 3, H, W)
+    tensor = zeros(Float32, 1, 3, H, W)
+    
+    # 2. Fill the tensor with the normalized tile data
+    tensor_whc = reshape(tensor, (W, H, 3))
+    
     if ndims(tile_norm) == 2
-        H, W = size(tile_norm)
-        tensor = zeros(Float32, 1, 3, H, W)
         for c in 1:3
-            tensor[1, c, :, :] .= tile_norm
+            for y in 1:H, x in 1:W
+                tensor_whc[x, y, c] = tile_norm[y, x]
+            end
         end
-        return tensor
     elseif ndims(tile_norm) == 3
-        H, W, C = size(tile_norm)
-        tensor = zeros(Float32, 1, 3, H, W)
+        C = size(tile_norm, 3)
         for c in 1:min(C, 3)
-            tensor[1, c, :, :] .= tile_norm[:, :, c]
+            for y in 1:H, x in 1:W
+                tensor_whc[x, y, c] = tile_norm[y, x, c]
+            end
         end
-        return tensor
     else
-        error("Image format not supported. Expected 2D (grayscale) or 3D (RGB) array.")
+        error("Image format not supported.")
     end
+    
+    # Return the tensor in the shape (1, 3, H, W) as expected by ONNX
+    return tensor
 end
 
 """
@@ -172,10 +182,16 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
         outputs = model(Dict("input_image" => input_tensor))
         out_tensor = outputs["flows_and_probs"]
         
+        # 1. Rileggiamo la memoria grezza di out_tensor nel suo ordine naturale C (W, H, Canali)
+        out_whc = reshape(out_tensor, (TILE_SIZE, TILE_SIZE, 3))
+        
+        # 2. Riordiniamo fisicamente gli assi per tornare allo standard di Julia (H, W, Canali)
+        out_hwc = permutedims(out_whc, (2, 1, 3))
+        
         lock(stitching_lock) do
-            cellprob_full[y_start:y_end, x_start:x_end] .+= out_tensor[1, 1, :, :] .* window
-            dP_full[1, y_start:y_end, x_start:x_end] .+= out_tensor[1, 2, :, :] .* window
-            dP_full[2, y_start:y_end, x_start:x_end] .+= out_tensor[1, 3, :, :] .* window
+            cellprob_full[y_start:y_end, x_start:x_end] .+= out_hwc[:, :, 1] .* window
+            dP_full[1, y_start:y_end, x_start:x_end] .+= out_hwc[:, :, 2] .* window
+            dP_full[2, y_start:y_end, x_start:x_end] .+= out_hwc[:, :, 3] .* window
             weight_sum[y_start:y_end, x_start:x_end] .+= window
         end
     end
