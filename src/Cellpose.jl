@@ -3,17 +3,20 @@ module Cellpose
 using Statistics
 using ONNXRunTime
 using Images
+using Random
+using FixedPointNumbers
+using FileIO
 
 include("Dynamics.jl")
 
-export normalize99, prepare_tensor, segment, compute_masks
+export normalize99, prepare_tensor, segment, compute_masks, save_masks
 
 """
     normalize99(img::AbstractArray)
 
-    Normalizes the input image (img) by scaling its pixel values based on the 1st and 99th percentiles. 
-    For grayscale images (2D), it applies the same normalization to all pixels. 
-    For RGB images (3D), it normalizes each channel independently, ensuring that the color information is preserved while enhancing contrast.
+Normalizes the input image (img) by scaling its pixel values based on the 1st and 99th percentiles. 
+For grayscale images (2D), it applies the same normalization to all pixels. 
+For RGB images (3D), it normalizes each channel independently, ensuring that color information is preserved while enhancing contrast.
 """
 function normalize99(img::AbstractArray)
     out = zeros(Float32, size(img))
@@ -24,7 +27,6 @@ function normalize99(img::AbstractArray)
             out .= (img .- p1) ./ (p99 - p1)
         end
     elseif ndims(img) == 3
-        # Normalize each channel independently
         for c in 1:size(img, 3)
             channel_data = vec(img[:, :, c])
             p1 = quantile(channel_data, 0.01)
@@ -40,46 +42,42 @@ end
 """
     prepare_tensor(tile_norm::AbstractArray)
 
-    Prepares the normalized tile (tile_norm) for input into the ONNX model.
-    For grayscale images (2D), it replicates the single channel into three channels to create a 4D tensor of shape (1, 3, H, W).
-    For RGB images (3D), it rearranges the dimensions to create a 4D tensor of shape (1, 3, H, W) while preserving the color information.
-    This function ensures that the input data is in the correct format expected by the ONNX model, facilitating accurate inference.
+Prepares the normalized tile (tile_norm) for input into the ONNX model.
+It safely structures the memory in Row-Major format to prevent dimensional 
+mismatches between Julia (Column-Major) and C++/ONNX.
+Returns a 4D tensor of shape (1, 3, H, W).
 """
 function prepare_tensor(tile_norm::AbstractArray)
     H, W = size(tile_norm)[1:2]
     
-    # 1. Initialize a tensor of zeros with the shape (1, 3, H, W)
-    tensor = zeros(Float32, 1, 3, H, W)
-    
-    # 2. Fill the tensor with the normalized tile data
-    tensor_whc = reshape(tensor, (W, H, 3))
+    # Memory safeguard: create exactly the linear sequence of floats expected by PyTorch/ONNX
+    tensor = zeros(Float32, W, H, 3, 1)
     
     if ndims(tile_norm) == 2
         for c in 1:3
             for y in 1:H, x in 1:W
-                tensor_whc[x, y, c] = tile_norm[y, x]
-            end
-        end
-    elseif ndims(tile_norm) == 3
-        C = size(tile_norm, 3)
-        for c in 1:min(C, 3)
-            for y in 1:H, x in 1:W
-                tensor_whc[x, y, c] = tile_norm[y, x, c]
+                tensor[x, y, c, 1] = tile_norm[y, x]
             end
         end
     else
-        error("Image format not supported.")
+        C = size(tile_norm, 3)
+        for c in 1:min(C, 3)
+            for y in 1:H, x in 1:W
+                tensor[x, y, c, 1] = tile_norm[y, x, c]
+            end
+        end
     end
     
-    # Return the tensor in the shape (1, 3, H, W) as expected by ONNX
-    return tensor
+    # Reshape alters the dimension labels for ONNX, but the underlying memory remains Row-Major
+    return reshape(tensor, (1, 3, H, W))
 end
 
 """
     pad_reflect(img::AbstractArray, pad_h::Int, pad_w::Int)
-    Pads the input image (img) by reflecting its borders.
-    This function is used to ensure that the input image meets the minimum size requirements for processing, while avoiding the introduction of artificial borders that could affect the segmentation results.
-    The padding is applied by reflecting the pixel values at the borders of the image, creating a seamless extension that preserves the natural structure of the image.
+
+Pads the input image (img) by reflecting its borders.
+This ensures the input image meets the minimum size requirements for the neural network tiles (e.g., 224x224),
+avoiding artificial sharp borders that could corrupt inference results.
 """
 function pad_reflect(img::AbstractArray, pad_h::Int, pad_w::Int)
     H, W = size(img)[1:2]
@@ -100,29 +98,29 @@ function pad_reflect(img::AbstractArray, pad_h::Int, pad_w::Int)
 end
 
 """
-    segment(img::AbstractArray, model_path::String)
+    segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
 
-    Native pipeline that replicates exactly Cellpose v4 (cpsam).
+Native Julia pipeline that exactly replicates the core functionality of Cellpose v4 (cpsam).
+It performs multi-threaded tiled inference, border blending, and Euler integration for flow dynamics.
 """
 function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
-    println("1. ONNX model initialization")
+    println("1. Initializing ONNX model...")
     if use_gpu
-        println("   --> Activating hardware acceleration (CUDA)...")
+        println("   --> Hardware acceleration activated (CUDA provider).")
         model = load_inference(model_path, execution_provider=:cuda)
     else
         model = load_inference(model_path)
     end
     
-    TILE_SIZE = 256
-    TILE_OVERLAP = 0.1 # 10% overlap 
-    STRIDE = round(Int, TILE_SIZE * (1.0 - TILE_OVERLAP)) # 230 pixel
+    TILE_SIZE = 224 # Standard Cellpose tile size
+    TILE_OVERLAP = 0.1 # 10% overlap between tiles
+    STRIDE = round(Int, TILE_SIZE * (1.0 - TILE_OVERLAP)) 
     
-    println("1.5 Global image normalization (per channel)")
+    println("1.5 Applying global image normalization (per channel)...")
     img_norm = normalize99(img)
     
     H, W = size(img_norm)[1:2]
     
-    # Pad only if the image is smaller than the tile size (256x256)
     pad_h = max(0, TILE_SIZE - H)
     pad_w = max(0, TILE_SIZE - W)
     
@@ -182,21 +180,22 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
         outputs = model(Dict("input_image" => input_tensor))
         out_tensor = outputs["flows_and_probs"]
         
-        # 1. Rileggiamo la memoria grezza di out_tensor nel suo ordine naturale C (W, H, Canali)
-        out_whc = reshape(out_tensor, (TILE_SIZE, TILE_SIZE, 3))
+        # Safe memory retrieval from ONNX's Row-Major format
+        out_rev = reshape(out_tensor, (TILE_SIZE, TILE_SIZE, 3, 1))
         
-        # 2. Riordiniamo fisicamente gli assi per tornare allo standard di Julia (H, W, Canali)
-        out_hwc = permutedims(out_whc, (2, 1, 3))
+        prob_tile = permutedims(out_rev[:, :, 1, 1], (2, 1))
+        dy_tile   = permutedims(out_rev[:, :, 2, 1], (2, 1))
+        dx_tile   = permutedims(out_rev[:, :, 3, 1], (2, 1))
         
         lock(stitching_lock) do
-            cellprob_full[y_start:y_end, x_start:x_end] .+= out_hwc[:, :, 1] .* window
-            dP_full[1, y_start:y_end, x_start:x_end] .+= out_hwc[:, :, 2] .* window
-            dP_full[2, y_start:y_end, x_start:x_end] .+= out_hwc[:, :, 3] .* window
+            cellprob_full[y_start:y_end, x_start:x_end] .+= prob_tile .* window
+            dP_full[1, y_start:y_end, x_start:x_end] .+= dy_tile .* window
+            dP_full[2, y_start:y_end, x_start:x_end] .+= dx_tile .* window
             weight_sum[y_start:y_end, x_start:x_end] .+= window
         end
     end
     
-    println("3. Normalizing borders and final cropping")
+    println("3. Normalizing borders and applying final crop...")
     weight_sum[weight_sum .== 0] .= 1.0f0
     
     cellprob_full ./= weight_sum
@@ -206,35 +205,72 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     cellprob_crop = cellprob_full[1:H, 1:W]
     dP_crop = dP_full[:, 1:H, 1:W]
     
-    println("4. Dynamic calculation of flows (Euler Integration)...")
+    println("4. Computing dynamic flows (Euler Integration)...")
+    
+    # CRITICAL FIX: Restore flows to true velocity magnitude (Standard Cellpose behavior)
+    dP_crop .*= 5.0f0 
+    
     masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=0.0, flow_threshold=0.4)
     
-    println("Completed! Found $(maximum(masks)) cells.")
+    println("Segmentation completed! Found $(maximum(masks)) cells.")
     return masks
 end
 
 """
     segment(img_path::String, model_path::String; use_gpu::Bool=false)
 
-    Wrapper function that allows users to input an image file path directly.
-    This function loads the image from the specified path, applies the necessary preprocessing to convert it into a format suitable for the ONNX model, and then calls the main `segment` function to perform the segmentation.
-    It supports both grayscale and RGB images, ensuring that the input data is correctly formatted for the segmentation pipeline while providing a user-friendly interface for loading images from disk.
+Wrapper function allowing users to input an image file path directly.
+Loads the image from disk, formats the Float32 arrays, and calls the main segmentation pipeline.
 """
 function segment(img_path::String, model_path::String; use_gpu::Bool=false)
-    println("Caricamento immagine da: $img_path ...")
+    println("Loading image from: $img_path ...")
     raw_img = load(img_path)
     
-    # Converte l'immagine in matrici Float32 digeribili dalla rete neurale
     if eltype(raw_img) <: Colorant
-        # Se è a colori (RGB), srotola i canali e riordina le dimensioni
         img_data = Float32.(permutedims(channelview(raw_img), (2, 3, 1)))
     else
-        # Se è in scala di grigi
         img_data = Float32.(raw_img)
     end
     
-    # Chiama la TUA funzione segment originale (quella vera con gli Array)
     return segment(img_data, model_path; use_gpu=use_gpu)
+end
+
+"""
+    save_masks(masks::AbstractMatrix{<:Integer}, output_path::String)
+
+Automatically saves the segmentation masks in two distinct formats:
+1. A 16-bit TIFF file (Analytical mask, intended for QuPath/ImageJ analysis).
+2. An RGB PNG file (Visual mask, colorized for human inspection).
+"""
+function save_masks(masks::AbstractMatrix{<:Integer}, output_path::String)
+    # Strip any existing extensions to ensure clean file naming
+    base_path = replace(output_path, r"\.(tif|tiff|png|jpg|jpeg)$"i => "")
+    
+    path_analytical = base_path * ".tif"
+    path_visual = base_path * "_visual.png"
+    
+    println("Saving output files...")
+    
+    # 1. Analytical Mask (16-bit TIFF)
+    analytical_mask = reinterpret(Gray{N0f16}, UInt16.(masks))
+    save(path_analytical, analytical_mask)
+    println("  [+] Analytical mask (16-bit) saved to: ", path_analytical)
+    
+    # 2. Visual Mask (RGB PNG)
+    n_cells = maximum(masks)
+    Random.seed!(42) # Ensure consistent color palettes across runs
+    
+    # Background is black, segmented cells are assigned bright, random colors
+    colors = [RGB(0.0, 0.0, 0.0)]
+    for _ in 1:n_cells
+        push!(colors, RGB(rand(0.3:0.1:1.0), rand(0.3:0.1:1.0), rand(0.3:0.1:1.0)))
+    end
+    
+    visual_mask = colors[masks .+ 1]
+    save(path_visual, visual_mask)
+    println("  [+] Visual mask (RGB) saved to: ", path_visual)
+    
+    return path_analytical, path_visual
 end
 
 end # module
