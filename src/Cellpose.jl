@@ -172,11 +172,7 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     
     println("4. Computing dynamic flows (Euler Integration)...")
     
-    # FIX: Ridiamo velocità ai flussi per farli aggregare al centro
-    dP_crop .*= 5.0f0 
-    
-    # FIX: Disabilitiamo il filtro flow_threshold (0.0) per non far cancellare le cellule buone!
-    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=0.0, flow_threshold=0.0)
+    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=0.5, flow_threshold=0.4)
     
     println("Segmentation completed! Found $(maximum(masks)) cells.")
     return masks
