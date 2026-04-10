@@ -219,8 +219,8 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
     seeds = Vector{Tuple{Int, Int, Int32}}()
     current_id = Int32(1)
     
-    # Soglia dinamica basata sulla densità dei pixel
-    min_hist = max(5, round(Int, 0.01 * sum(iscell)))
+    # Soglia fissa come cellpose python
+    min_hist = 10
     
     for x in 1:W, y in 1:H
         if hist[y, x] >= min_hist
@@ -344,22 +344,26 @@ end
 
 function prepare_tensor(tile_norm::AbstractArray)
     H, W = size(tile_norm)[1:2]
-    tensor = zeros(Float32, W, H, 3, 1)
+    # Alloca direttamente nel formato NCHW (1, 3, H, W)
+    tensor = zeros(Float32, 1, 3, H, W)
+    
     if ndims(tile_norm) == 2
+        # Grayscale: duplica su 3 canali
         for c in 1:3
             for y in 1:H, x in 1:W
-                tensor[x, y, c, 1] = tile_norm[y, x]
+                tensor[1, c, y, x] = tile_norm[y, x]
             end
         end
     else
+        # Color: prendi i primi 3 canali
         C = size(tile_norm, 3)
         for c in 1:min(C, 3)
             for y in 1:H, x in 1:W
-                tensor[x, y, c, 1] = tile_norm[y, x, c]
+                tensor[1, c, y, x] = tile_norm[y, x, c]
             end
         end
     end
-    return reshape(tensor, (1, 3, H, W))
+    return tensor
 end
 
 function pad_reflect(img::AbstractArray, pad_h::Int, pad_w::Int)
