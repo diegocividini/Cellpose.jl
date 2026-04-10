@@ -11,13 +11,6 @@ include("Dynamics.jl")
 
 export normalize99, prepare_tensor, segment, compute_masks, save_masks
 
-"""
-    normalize99(img::AbstractArray)
-
-Normalizes the input image (img) by scaling its pixel values based on the 1st and 99th percentiles. 
-For grayscale images (2D), it applies the same normalization to all pixels. 
-For RGB images (3D), it normalizes each channel independently, ensuring that color information is preserved while enhancing contrast.
-"""
 function normalize99(img::AbstractArray)
     out = zeros(Float32, size(img))
     if ndims(img) == 2
@@ -39,20 +32,9 @@ function normalize99(img::AbstractArray)
     return out
 end
 
-"""
-    prepare_tensor(tile_norm::AbstractArray)
-
-Prepares the normalized tile (tile_norm) for input into the ONNX model.
-It safely structures the memory in Row-Major format to prevent dimensional 
-mismatches between Julia (Column-Major) and C++/ONNX.
-Returns a 4D tensor of shape (1, 3, H, W).
-"""
 function prepare_tensor(tile_norm::AbstractArray)
     H, W = size(tile_norm)[1:2]
-    
-    # Memory safeguard: create exactly the linear sequence of floats expected by PyTorch/ONNX
     tensor = zeros(Float32, W, H, 3, 1)
-    
     if ndims(tile_norm) == 2
         for c in 1:3
             for y in 1:H, x in 1:W
@@ -67,18 +49,9 @@ function prepare_tensor(tile_norm::AbstractArray)
             end
         end
     end
-    
-    # Reshape alters the dimension labels for ONNX, but the underlying memory remains Row-Major
     return reshape(tensor, (1, 3, H, W))
 end
 
-"""
-    pad_reflect(img::AbstractArray, pad_h::Int, pad_w::Int)
-
-Pads the input image (img) by reflecting its borders.
-This ensures the input image meets the minimum size requirements for the neural network tiles (e.g., 224x224),
-avoiding artificial sharp borders that could corrupt inference results.
-"""
 function pad_reflect(img::AbstractArray, pad_h::Int, pad_w::Int)
     H, W = size(img)[1:2]
     if ndims(img) == 2
@@ -97,12 +70,6 @@ function pad_reflect(img::AbstractArray, pad_h::Int, pad_w::Int)
     end
 end
 
-"""
-    segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
-
-Native Julia pipeline that exactly replicates the core functionality of Cellpose v4 (cpsam).
-It performs multi-threaded tiled inference, border blending, and Euler integration for flow dynamics.
-"""
 function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     println("1. Initializing ONNX model...")
     if use_gpu
@@ -112,8 +79,8 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
         model = load_inference(model_path)
     end
     
-    TILE_SIZE = 256 # Standard Cellpose tile size
-    TILE_OVERLAP = 0.1 # 10% overlap between tiles
+    TILE_SIZE = 256 # Riportato a 256 (Dimensione statica del modello)
+    TILE_OVERLAP = 0.1
     STRIDE = round(Int, TILE_SIZE * (1.0 - TILE_OVERLAP)) 
     
     println("1.5 Applying global image normalization (per channel)...")
@@ -148,7 +115,6 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     cellprob_full = zeros(Float32, H_pad, W_pad)
     weight_sum = zeros(Float32, H_pad, W_pad)
     
-    # Precompute the blending window (tapering) to apply to each tile's output for smooth stitching
     tap = Float32.(abs.(range(-1.0, 1.0, length=TILE_SIZE)))
     tap .= 1.0f0 .- tap
     for i in 1:TILE_SIZE
@@ -180,7 +146,6 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
         outputs = model(Dict("input_image" => input_tensor))
         out_tensor = outputs["flows_and_probs"]
         
-        # Safe memory retrieval from ONNX's Row-Major format
         out_rev = reshape(out_tensor, (TILE_SIZE, TILE_SIZE, 3, 1))
         
         prob_tile = permutedims(out_rev[:, :, 1, 1], (2, 1))
@@ -207,8 +172,7 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     
     println("4. Computing dynamic flows (Euler Integration)...")
     
-    # CRITICAL FIX: Restore flows to true velocity magnitude (Standard Cellpose behavior)
-    dP_crop .*= 5.0f0 
+    # Moltiplicatore 5.0 RIMOSSO. cpsam.onnx ha già i flussi scalati!
     
     masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=0.0, flow_threshold=0.4)
     
@@ -216,12 +180,6 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     return masks
 end
 
-"""
-    segment(img_path::String, model_path::String; use_gpu::Bool=false)
-
-Wrapper function allowing users to input an image file path directly.
-Loads the image from disk, formats the Float32 arrays, and calls the main segmentation pipeline.
-"""
 function segment(img_path::String, model_path::String; use_gpu::Bool=false)
     println("Loading image from: $img_path ...")
     raw_img = load(img_path)
@@ -235,13 +193,6 @@ function segment(img_path::String, model_path::String; use_gpu::Bool=false)
     return segment(img_data, model_path; use_gpu=use_gpu)
 end
 
-"""
-    save_masks(img_path::String, masks::AbstractMatrix{<:Integer}, output_path::String)
-
-Salva automaticamente le maschere di segmentazione in due formati:
-1. File TIFF a 16-bit (Maschera analitica per QuPath/ImageJ).
-2. File PNG RGB (Overlay visivo: Immagine originale + Contorni e maschere semitrasparenti).
-"""
 function save_masks(img_path::String, masks::AbstractMatrix{<:Integer}, output_path::String)
     base_path = replace(output_path, r"\.(tif|tiff|png|jpg|jpeg)$"i => "")
     
@@ -250,38 +201,31 @@ function save_masks(img_path::String, masks::AbstractMatrix{<:Integer}, output_p
     
     println("Salvataggio risultati in corso...")
     
-    # ==========================================
-    # 1. Maschera Analitica (16-bit TIFF per analisi)
-    # ==========================================
+    # 1. Maschera Analitica
     analytical_mask = reinterpret(Gray{N0f16}, UInt16.(masks))
     save(path_analytical, analytical_mask)
     println("  [+] Maschera analitica (16-bit) salvata in: ", path_analytical)
     
-    # ==========================================
-    # 2. Overlay Visivo (Stile originale Cellpose Python)
-    # ==========================================
-    # Carichiamo l'immagine originale per usarla come sfondo
+    # 2. Overlay
     raw_img = load(img_path)
-    if eltype(raw_img) <: Colorant
-        if ndims(raw_img) == 2
-            img_data = Float32.(raw_img)
-        else
-            img_data = Float32.(permutedims(channelview(raw_img), (2, 3, 1)))
-        end
+    
+    # Check di sicurezza per estrarre la matrice dati pura indipendentemente dai colori
+    if eltype(raw_img) <: RGB
+        img_data = Float32.(permutedims(channelview(raw_img), (2, 3, 1)))
+    elseif eltype(raw_img) <: Colorant
+        img_data = Float32.(permutedims(channelview(RGB.(raw_img)), (2, 3, 1)))
     else
         img_data = Float32.(raw_img)
     end
     
-    # Normalizziamo l'immagine di sfondo per assicurarci che sia ben visibile (luminosa)
     img_norm = normalize99(img_data)
     H, W = size(masks)
     
-    # Creiamo un "Canvas" RGB usando l'immagine originale come base
     overlay = zeros(RGB{Float32}, H, W)
     if ndims(img_norm) == 2
         for y in 1:H, x in 1:W
             v = img_norm[y, x]
-            overlay[y, x] = RGB(v, v, v) # Converte Scala di grigi in RGB
+            overlay[y, x] = RGB(v, v, v)
         end
     else
         for y in 1:H, x in 1:W
@@ -289,39 +233,35 @@ function save_masks(img_path::String, masks::AbstractMatrix{<:Integer}, output_p
         end
     end
     
-    # Creiamo i colori per le cellule
     n_cells = maximum(masks)
-    Random.seed!(42) 
-    colors = [RGB(0.0, 0.0, 0.0)]
-    for _ in 1:n_cells
-        push!(colors, RGB(rand(0.3:0.1:1.0), rand(0.3:0.1:1.0), rand(0.3:0.1:1.0)))
-    end
-    
-    # Algoritmo di Overlay: Disegna i bordi netti e l'interno semitrasparente (Alpha Blending)
-    for y in 1:H, x in 1:W
-        m = masks[y, x]
-        if m > 0
-            c = colors[m + 1]
-            
-            # Controlla se il pixel si trova sul bordo della cellula
-            is_boundary = false
-            for dy in -1:1, dx in -1:1
-                ny, nx = y + dy, x + dx
-                if 1 <= ny <= H && 1 <= nx <= W
-                    if masks[ny, nx] != m
-                        is_boundary = true
-                        break
+    if n_cells > 0
+        Random.seed!(42) 
+        colors = [RGB(0.0, 0.0, 0.0)]
+        for _ in 1:n_cells
+            push!(colors, RGB(rand(0.3:0.1:1.0), rand(0.3:0.1:1.0), rand(0.3:0.1:1.0)))
+        end
+        
+        for y in 1:H, x in 1:W
+            m = masks[y, x]
+            if m > 0
+                c = colors[m + 1]
+                is_boundary = false
+                for dy in -1:1, dx in -1:1
+                    ny, nx = y + dy, x + dx
+                    if 1 <= ny <= H && 1 <= nx <= W
+                        if masks[ny, nx] != m
+                            is_boundary = true
+                            break
+                        end
                     end
                 end
-            end
-            
-            if is_boundary
-                # Se è un bordo, dipingiamo il colore al 100% per evidenziare il contorno
-                overlay[y, x] = c
-            else
-                # Se è l'interno della cellula, facciamo un mix: 70% immagine originale, 30% colore
-                bg = overlay[y, x]
-                overlay[y, x] = bg * 0.7f0 + c * 0.3f0
+                
+                if is_boundary
+                    overlay[y, x] = c
+                else
+                    bg = overlay[y, x]
+                    overlay[y, x] = bg * 0.7f0 + c * 0.3f0
+                end
             end
         end
     end
