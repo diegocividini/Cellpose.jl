@@ -148,9 +148,10 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
         
         out_rev = reshape(out_tensor, (TILE_SIZE, TILE_SIZE, 3, 1))
         
-        prob_tile = permutedims(out_rev[:, :, 1, 1], (2, 1))
-        dy_tile   = permutedims(out_rev[:, :, 2, 1], (2, 1))
-        dx_tile   = permutedims(out_rev[:, :, 3, 1], (2, 1))
+        # 🔌 FIX: ALLINEAMENTO CORRETTO DEI CANALI DI CELLPOSE [dY, dX, cellprob]
+        dy_tile   = permutedims(out_rev[:, :, 1, 1], (2, 1)) # Canale 1: Flusso Y
+        dx_tile   = permutedims(out_rev[:, :, 2, 1], (2, 1)) # Canale 2: Flusso X
+        prob_tile = permutedims(out_rev[:, :, 3, 1], (2, 1)) # Canale 3: Probabilità
         
         lock(stitching_lock) do
             cellprob_full[y_start:y_end, x_start:x_end] .+= prob_tile .* window
@@ -172,7 +173,11 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     
     println("4. Computing dynamic flows (Euler Integration)...")
     
-    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=0.5, flow_threshold=0.4)
+    # Ora che i flussi sono VERI flussi, rimettiamo il moltiplicatore
+    dP_crop .*= 5.0f0 
+    
+    # Riportiamo le soglie ai valori originali di Cellpose
+    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=0.0, flow_threshold=0.4)
     
     println("Segmentation completed! Found $(maximum(masks)) cells.")
     return masks
@@ -263,7 +268,6 @@ function save_masks(img_path::String, masks::AbstractMatrix{<:Integer}, output_p
         end
     end
     
-    # FIX: Converte forzatamente i colori a 8-bit per non corrompere il PNG!
     overlay_u8 = map(c -> RGB{N0f8}(clamp(red(c), 0.0f0, 1.0f0), clamp(green(c), 0.0f0, 1.0f0), clamp(blue(c), 0.0f0, 1.0f0)), overlay)
     
     save(path_visual, overlay_u8)
