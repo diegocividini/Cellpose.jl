@@ -236,39 +236,98 @@ function segment(img_path::String, model_path::String; use_gpu::Bool=false)
 end
 
 """
-    save_masks(masks::AbstractMatrix{<:Integer}, output_path::String)
+    save_masks(img_path::String, masks::AbstractMatrix{<:Integer}, output_path::String)
 
-Automatically saves the segmentation masks in two distinct formats:
-1. A 16-bit TIFF file (Analytical mask, intended for QuPath/ImageJ analysis).
-2. An RGB PNG file (Visual mask, colorized for human inspection).
+Salva automaticamente le maschere di segmentazione in due formati:
+1. File TIFF a 16-bit (Maschera analitica per QuPath/ImageJ).
+2. File PNG RGB (Overlay visivo: Immagine originale + Contorni e maschere semitrasparenti).
 """
-function save_masks(masks::AbstractMatrix{<:Integer}, output_path::String)
-    # Strip any existing extensions to ensure clean file naming
+function save_masks(img_path::String, masks::AbstractMatrix{<:Integer}, output_path::String)
     base_path = replace(output_path, r"\.(tif|tiff|png|jpg|jpeg)$"i => "")
     
     path_analytical = base_path * ".tif"
-    path_visual = base_path * "_visual.png"
+    path_visual = base_path * "_overlay.png"
     
-    println("Saving output files...")
+    println("Salvataggio risultati in corso...")
     
-    # 1. Analytical Mask (16-bit TIFF)
+    # ==========================================
+    # 1. Maschera Analitica (16-bit TIFF per analisi)
+    # ==========================================
     analytical_mask = reinterpret(Gray{N0f16}, UInt16.(masks))
     save(path_analytical, analytical_mask)
-    println("  [+] Analytical mask (16-bit) saved to: ", path_analytical)
+    println("  [+] Maschera analitica (16-bit) salvata in: ", path_analytical)
     
-    # 2. Visual Mask (RGB PNG)
+    # ==========================================
+    # 2. Overlay Visivo (Stile originale Cellpose Python)
+    # ==========================================
+    # Carichiamo l'immagine originale per usarla come sfondo
+    raw_img = load(img_path)
+    if eltype(raw_img) <: Colorant
+        if ndims(raw_img) == 2
+            img_data = Float32.(raw_img)
+        else
+            img_data = Float32.(permutedims(channelview(raw_img), (2, 3, 1)))
+        end
+    else
+        img_data = Float32.(raw_img)
+    end
+    
+    # Normalizziamo l'immagine di sfondo per assicurarci che sia ben visibile (luminosa)
+    img_norm = normalize99(img_data)
+    H, W = size(masks)
+    
+    # Creiamo un "Canvas" RGB usando l'immagine originale come base
+    overlay = zeros(RGB{Float32}, H, W)
+    if ndims(img_norm) == 2
+        for y in 1:H, x in 1:W
+            v = img_norm[y, x]
+            overlay[y, x] = RGB(v, v, v) # Converte Scala di grigi in RGB
+        end
+    else
+        for y in 1:H, x in 1:W
+            overlay[y, x] = RGB(img_norm[y, x, 1], img_norm[y, x, 2], img_norm[y, x, 3])
+        end
+    end
+    
+    # Creiamo i colori per le cellule
     n_cells = maximum(masks)
-    Random.seed!(42) # Ensure consistent color palettes across runs
-    
-    # Background is black, segmented cells are assigned bright, random colors
+    Random.seed!(42) 
     colors = [RGB(0.0, 0.0, 0.0)]
     for _ in 1:n_cells
         push!(colors, RGB(rand(0.3:0.1:1.0), rand(0.3:0.1:1.0), rand(0.3:0.1:1.0)))
     end
     
-    visual_mask = colors[masks .+ 1]
-    save(path_visual, visual_mask)
-    println("  [+] Visual mask (RGB) saved to: ", path_visual)
+    # Algoritmo di Overlay: Disegna i bordi netti e l'interno semitrasparente (Alpha Blending)
+    for y in 1:H, x in 1:W
+        m = masks[y, x]
+        if m > 0
+            c = colors[m + 1]
+            
+            # Controlla se il pixel si trova sul bordo della cellula
+            is_boundary = false
+            for dy in -1:1, dx in -1:1
+                ny, nx = y + dy, x + dx
+                if 1 <= ny <= H && 1 <= nx <= W
+                    if masks[ny, nx] != m
+                        is_boundary = true
+                        break
+                    end
+                end
+            end
+            
+            if is_boundary
+                # Se è un bordo, dipingiamo il colore al 100% per evidenziare il contorno
+                overlay[y, x] = c
+            else
+                # Se è l'interno della cellula, facciamo un mix: 70% immagine originale, 30% colore
+                bg = overlay[y, x]
+                overlay[y, x] = bg * 0.7f0 + c * 0.3f0
+            end
+        end
+    end
+    
+    save(path_visual, overlay)
+    println("  [+] Overlay visivo (Immagine + Maschere) salvato in: ", path_visual)
     
     return path_analytical, path_visual
 end
