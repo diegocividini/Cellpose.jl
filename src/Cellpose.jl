@@ -148,7 +148,6 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
         
         out_rev = reshape(out_tensor, (TILE_SIZE, TILE_SIZE, 3, 1))
         
-        # 🟢 IL FIX DELLA VERITÀ (Leggendo il sorgente Python): 1=dY, 2=dX, 3=Prob
         dy_tile   = permutedims(out_rev[:, :, 1, 1], (2, 1)) 
         dx_tile   = permutedims(out_rev[:, :, 2, 1], (2, 1)) 
         prob_tile = permutedims(out_rev[:, :, 3, 1], (2, 1)) 
@@ -173,10 +172,6 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     
     println("4. Computing dynamic flows (Euler Integration)...")
     
-    # 🟢 LA SECONDA VERITÀ: La rete è stata addestrata con flussi 5x. 
-    # Non dobbiamo moltiplicarli di nuovo in Julia. Li passiamo "puri".
-    
-    # 🟢 LA TERZA VERITÀ: Threshold=0.0 è corretto per i logits di default.
     masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=0.0, flow_threshold=0.4)
     
     println("Segmentation completed! Found $(maximum(masks)) cells.")
@@ -187,9 +182,8 @@ function segment(img_path::String, model_path::String; use_gpu::Bool=false)
     println("Loading image from: $img_path ...")
     raw_img = load(img_path)
     
-    # EMULA EXACTLY "channels=[0,0]" DI PYTHON (Forza tutto a scala di grigi)
     if eltype(raw_img) <: Colorant
-        gray_img = Gray.(raw_img) # Converte RGB in Scala di Grigi
+        gray_img = Gray.(raw_img) 
         img_data = Float32.(gray_img)
     else
         img_data = Float32.(raw_img)
@@ -206,34 +200,26 @@ function save_masks(img_path::String, masks::AbstractMatrix{<:Integer}, output_p
     
     println("Salvataggio risultati in corso...")
     
-    # 1. Maschera Analitica
+    # 1. Maschera Analitica (Maschera 16-bit compatibile con QuPath / ImageJ)
     analytical_mask = reinterpret(Gray{N0f16}, UInt16.(masks))
     save(path_analytical, analytical_mask)
     println("  [+] Maschera analitica (16-bit) salvata in: ", path_analytical)
     
     # 2. Overlay
     raw_img = load(img_path)
-    
-    if eltype(raw_img) <: RGB
-        img_data = Float32.(permutedims(channelview(raw_img), (2, 3, 1)))
-    elseif eltype(raw_img) <: Colorant
-        img_data = Float32.(permutedims(channelview(RGB.(raw_img)), (2, 3, 1)))
-    else
-        img_data = Float32.(raw_img)
-    end
-    
-    img_norm = normalize99(img_data)
     H, W = size(masks)
     
+    # FIX DEFINITIVO: Usiamo i colori RGB originali intatti come sfondo!
     overlay = zeros(RGB{Float32}, H, W)
-    if ndims(img_norm) == 2
+    if eltype(raw_img) <: Colorant
+        rgb_img = RGB.(raw_img)
         for y in 1:H, x in 1:W
-            v = img_norm[y, x]
-            overlay[y, x] = RGB(v, v, v)
+            overlay[y, x] = rgb_img[y, x]
         end
     else
         for y in 1:H, x in 1:W
-            overlay[y, x] = RGB(img_norm[y, x, 1], img_norm[y, x, 2], img_norm[y, x, 3])
+            v = Float32(raw_img[y, x])
+            overlay[y, x] = RGB(v, v, v)
         end
     end
     
@@ -242,7 +228,7 @@ function save_masks(img_path::String, masks::AbstractMatrix{<:Integer}, output_p
         Random.seed!(42) 
         colors = [RGB(0.0, 0.0, 0.0)]
         for _ in 1:n_cells
-            push!(colors, RGB(rand(0.3:0.1:1.0), rand(0.3:0.1:1.0), rand(0.3:0.1:1.0)))
+            push!(colors, RGB(rand(0.3:1.0), rand(0.3:1.0), rand(0.3:1.0)))
         end
         
         for y in 1:H, x in 1:W
@@ -264,6 +250,7 @@ function save_masks(img_path::String, masks::AbstractMatrix{<:Integer}, output_p
                     overlay[y, x] = c
                 else
                     bg = overlay[y, x]
+                    # Mix: 70% foto rosa originale, 30% colore della cellula
                     overlay[y, x] = bg * 0.7f0 + c * 0.3f0
                 end
             end
