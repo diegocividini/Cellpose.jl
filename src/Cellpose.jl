@@ -10,48 +10,29 @@ using FileIO
 export normalize99, prepare_tensor, segment, compute_masks, save_masks
 
 # ==============================================================================
-# 1. CORE DYNAMICS ALGORITHMS (Traduzione esatta di dynamics.py)
+# 1. CORE DYNAMICS ALGORITHMS
 # ==============================================================================
 
 function follow_flows(dP::AbstractArray{T, 3}; niter::Int=200) where T
     _, H, W = size(dP)
     p = zeros(Float32, 2, H, W)
     
-    # Inizializziamo ogni particella nella sua posizione di partenza
     for x in 1:W, y in 1:H
         p[1, y, x] = y
         p[2, y, x] = x
     end
     
-    # Integrazione di Eulero con Interpolazione Bilineare
+    # Integrazione di Eulero: i pixel si muovono dolcemente
     for i in 1:niter
         for x in 1:W, y in 1:H
             py = p[1, y, x]
             px = p[2, y, x]
             
-            # IL FIX DEFINITIVO: Interpolazione Bilineare per evitare l'oscillazione dei pixel
-            yf = floor(Int, py)
-            xf = floor(Int, px)
-            yc = yf + 1
-            xc = xf + 1
+            y_idx = clamp(round(Int, py), 1, H)
+            x_idx = clamp(round(Int, px), 1, W)
             
-            y0 = clamp(yf, 1, H); x0 = clamp(xf, 1, W)
-            y1 = clamp(yc, 1, H); x1 = clamp(xc, 1, W)
-            
-            wy = py - yf
-            wx = px - xf
-            
-            dy00 = dP[1, y0, x0]; dy01 = dP[1, y0, x1]
-            dy10 = dP[1, y1, x0]; dy11 = dP[1, y1, x1]
-            
-            dx00 = dP[2, y0, x0]; dx01 = dP[2, y0, x1]
-            dx10 = dP[2, y1, x0]; dx11 = dP[2, y1, x1]
-            
-            dp_y = (1.0f0 - wy)*((1.0f0 - wx)*dy00 + wx*dy01) + wy*((1.0f0 - wx)*dy10 + wx*dy11)
-            dp_x = (1.0f0 - wy)*((1.0f0 - wx)*dx00 + wx*dx01) + wy*((1.0f0 - wx)*dx10 + wx*dx11)
-            
-            p[1, y, x] = py + dp_y
-            p[2, y, x] = px + dp_x
+            p[1, y, x] = py + dP[1, y_idx, x_idx]
+            p[2, y, x] = px + dP[2, y_idx, x_idx]
         end
     end
     
@@ -156,8 +137,9 @@ function remove_bad_flow_masks!(masks::AbstractMatrix{<:Integer}, dP::AbstractAr
     for y in 1:H, x in 1:W
         m = masks[y, x]
         if m > 0
-            dy_net = dP[1, y, x] / 5.0f0
-            dx_net = dP[2, y, x] / 5.0f0
+            # FIX: dP è già stato diviso per 5.0, ora ha magnitudine 1 come "mu"
+            dy_net = dP[1, y, x]
+            dx_net = dP[2, y, x]
             
             dy_mask = mu[1, y, x]
             dx_mask = mu[2, y, x]
@@ -336,6 +318,7 @@ function pad_reflect(img::AbstractArray, pad_h::Int, pad_w::Int)
         C = size(img, 3)
         out = zeros(Float32, H + pad_h, W + pad_w, C)
         out[1:H, 1:W, :] .= img
+        out[1:H, 1:W, :] .= img
         for y in 1:pad_h, x in 1:W, c in 1:C; out[H+y, x, c] = img[H-y+1, x, c]; end
         for y in 1:H+pad_h, x in 1:pad_w, c in 1:C; out[y, W+x, c] = out[y, W-x+1, c]; end
         return out
@@ -443,6 +426,10 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     dP_crop = dP_full[:, 1:H, 1:W]
     
     println("4. Computing dynamic flows (Euler Integration)...")
+    
+    # 🟢 LA CHIAVE DELLA STABILITÀ: Riportiamo i flussi alla magnitudine unitaria
+    # Questo previene l'overshoot (il rimbalzo) dei pixel e fa sparire il "rumore"
+    dP_crop ./= 5.0f0 
     
     masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=0.0, flow_threshold=0.4)
     
