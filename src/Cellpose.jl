@@ -148,10 +148,10 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
         
         out_rev = reshape(out_tensor, (TILE_SIZE, TILE_SIZE, 3, 1))
         
-        # 🔌 FIX: ALLINEAMENTO CORRETTO DEI CANALI DI CELLPOSE [dY, dX, cellprob]
-        dy_tile   = permutedims(out_rev[:, :, 1, 1], (2, 1)) # Canale 1: Flusso Y
-        dx_tile   = permutedims(out_rev[:, :, 2, 1], (2, 1)) # Canale 2: Flusso X
-        prob_tile = permutedims(out_rev[:, :, 3, 1], (2, 1)) # Canale 3: Probabilità
+        # 🟢 ORDINE CORRETTO ASSOLUTO: 1=Prob, 2=Y, 3=X
+        prob_tile = permutedims(out_rev[:, :, 1, 1], (2, 1)) 
+        dy_tile   = permutedims(out_rev[:, :, 2, 1], (2, 1)) 
+        dx_tile   = permutedims(out_rev[:, :, 3, 1], (2, 1)) 
         
         lock(stitching_lock) do
             cellprob_full[y_start:y_end, x_start:x_end] .+= prob_tile .* window
@@ -173,10 +173,10 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     
     println("4. Computing dynamic flows (Euler Integration)...")
     
-    # Ora che i flussi sono VERI flussi, rimettiamo il moltiplicatore
+    # 🟢 MOLTIPLICATORE NECESSARIO PER CREARE I "PALLINI PIENI"
     dP_crop .*= 5.0f0 
     
-    # Riportiamo le soglie ai valori originali di Cellpose
+    # 🟢 SOGLIE STANDARD DI CELLPOSE (0.0 E 0.4)
     masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=0.0, flow_threshold=0.4)
     
     println("Segmentation completed! Found $(maximum(masks)) cells.")
