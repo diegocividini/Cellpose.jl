@@ -7,9 +7,281 @@ using Random
 using FixedPointNumbers
 using FileIO
 
-include("Dynamics.jl")
-
 export normalize99, prepare_tensor, segment, compute_masks, save_masks
+
+# ==============================================================================
+# 1. CORE DYNAMICS ALGORITHMS (Traduzione esatta di dynamics.py)
+# ==============================================================================
+
+function follow_flows(dP::AbstractArray{T, 3}; niter::Int=200) where T
+    _, H, W = size(dP)
+    p = zeros(Float32, 2, H, W)
+    
+    # Inizializziamo ogni particella nella sua posizione di partenza
+    for x in 1:W, y in 1:H
+        p[1, y, x] = y
+        p[2, y, x] = x
+    end
+    
+    # Integrazione di Eulero con Interpolazione Bilineare
+    for i in 1:niter
+        for x in 1:W, y in 1:H
+            py = p[1, y, x]
+            px = p[2, y, x]
+            
+            # IL FIX DEFINITIVO: Interpolazione Bilineare per evitare l'oscillazione dei pixel
+            yf = floor(Int, py)
+            xf = floor(Int, px)
+            yc = yf + 1
+            xc = xf + 1
+            
+            y0 = clamp(yf, 1, H); x0 = clamp(xf, 1, W)
+            y1 = clamp(yc, 1, H); x1 = clamp(xc, 1, W)
+            
+            wy = py - yf
+            wx = px - xf
+            
+            dy00 = dP[1, y0, x0]; dy01 = dP[1, y0, x1]
+            dy10 = dP[1, y1, x0]; dy11 = dP[1, y1, x1]
+            
+            dx00 = dP[2, y0, x0]; dx01 = dP[2, y0, x1]
+            dx10 = dP[2, y1, x0]; dx11 = dP[2, y1, x1]
+            
+            dp_y = (1.0f0 - wy)*((1.0f0 - wx)*dy00 + wx*dy01) + wy*((1.0f0 - wx)*dy10 + wx*dy11)
+            dp_x = (1.0f0 - wy)*((1.0f0 - wx)*dx00 + wx*dx01) + wy*((1.0f0 - wx)*dx10 + wx*dx11)
+            
+            p[1, y, x] = py + dp_y
+            p[2, y, x] = px + dp_x
+        end
+    end
+    
+    return p
+end
+
+function masks_to_flows(masks::AbstractMatrix{<:Integer})
+    H, W = size(masks)
+    T = zeros(Float32, H, W)
+    mu = zeros(Float32, 2, H, W)
+    
+    n_masks = maximum(masks)
+    if n_masks == 0
+        return mu
+    end
+    
+    valid_pixels = Tuple{Int, Int, Int}[] 
+    coords_dict = Dict{Int, Vector{Tuple{Int, Int}}}()
+    
+    for y in 2:H-1, x in 2:W-1
+        m = masks[y, x]
+        if m > 0
+            push!(valid_pixels, (y, x, m))
+            if !haskey(coords_dict, m)
+                coords_dict[m] = Tuple{Int, Int}[]
+            end
+            push!(coords_dict[m], (y, x))
+        end
+    end
+    
+    centers = fill((0, 0), n_masks)
+    for i in 1:n_masks
+        if !haskey(coords_dict, i)
+            continue
+        end
+        coords = coords_dict[i]
+        sum_y = sum(c[1] for c in coords)
+        sum_x = sum(c[2] for c in coords)
+        mean_y = round(Int, sum_y / length(coords))
+        mean_x = round(Int, sum_x / length(coords))
+        
+        min_dist = Inf
+        center = coords[1]
+        for c in coords
+            dist = (c[1] - mean_y)^2 + (c[2] - mean_x)^2
+            if dist < min_dist
+                min_dist = dist
+                center = c
+            end
+        end
+        centers[i] = center
+    end
+    
+    n_iter = 200 
+    T_new = zeros(Float32, H, W)
+    
+    for iter in 1:n_iter
+        for i in 1:n_masks
+            cy, cx = centers[i]
+            if cy != 0
+                T[cy, cx] += 1.0f0
+            end
+        end
+        
+        for (y, x, m) in valid_pixels
+            s = 0.0f0
+            c = 0
+            for dy in -1:1, dx in -1:1
+                if masks[y+dy, x+dx] == m
+                    s += T[y+dy, x+dx]
+                    c += 1
+                end
+            end
+            T_new[y, x] = s / c
+        end
+        
+        for (y, x, m) in valid_pixels
+            T[y, x] = T_new[y, x]
+        end
+    end
+    
+    for (y, x, m) in valid_pixels
+        dy = T[y+1, x] - T[y-1, x]
+        dx = T[y, x+1] - T[y, x-1]
+        norm = sqrt(dy^2 + dx^2) + 1f-20
+        mu[1, y, x] = dy / norm
+        mu[2, y, x] = dx / norm
+    end
+    
+    return mu
+end
+
+function remove_bad_flow_masks!(masks::AbstractMatrix{<:Integer}, dP::AbstractArray{<:AbstractFloat, 3}; threshold=0.4)
+    mu = masks_to_flows(masks)
+    
+    n_masks = maximum(masks)
+    errors = zeros(Float32, n_masks)
+    counts = zeros(Int, n_masks)
+    
+    H, W = size(masks)
+    
+    for y in 1:H, x in 1:W
+        m = masks[y, x]
+        if m > 0
+            dy_net = dP[1, y, x] / 5.0f0
+            dx_net = dP[2, y, x] / 5.0f0
+            
+            dy_mask = mu[1, y, x]
+            dx_mask = mu[2, y, x]
+            
+            err = (dy_mask - dy_net)^2 + (dx_mask - dx_net)^2
+            errors[m] += err
+            counts[m] += 1
+        end
+    end
+    
+    for m in 1:n_masks
+        if counts[m] > 0
+            errors[m] /= counts[m]
+        end
+    end
+    
+    for i in eachindex(masks)
+        m = masks[i]
+        if m > 0 && errors[m] > threshold
+            masks[i] = 0
+        end
+    end
+    
+    return masks
+end
+
+function remove_small_masks!(masks::AbstractMatrix{<:Integer}; min_size::Int=15)
+    sizes = Dict{Int, Int}()
+    for val in masks
+        if val > 0
+            sizes[val] = get(sizes, val, 0) + 1
+        end
+    end
+    
+    new_ids = Dict{Int, Int}()
+    current_id = 1
+    for (val, count) in sizes
+        if count >= min_size
+            new_ids[val] = current_id
+            current_id += 1
+        else
+            new_ids[val] = 0
+        end
+    end
+    
+    for i in eachindex(masks)
+        val = masks[i]
+        if val > 0
+            masks[i] = new_ids[val]
+        end
+    end
+    
+    return masks
+end
+
+function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T}; 
+                        niter::Int=200, cellprob_threshold::Float64=0.0, flow_threshold::Float64=0.4) where T
+    
+    p = follow_flows(dP, niter=niter)
+    
+    H, W = size(cellprob)
+    iscell = cellprob .> cellprob_threshold
+    
+    hist = zeros(Int32, H, W)
+    for x in 1:W, y in 1:H
+        if iscell[y, x]
+            py = clamp(round(Int, p[1, y, x]), 1, H)
+            px = clamp(round(Int, p[2, y, x]), 1, W)
+            hist[py, px] += 1
+        end
+    end
+    
+    seeds = Vector{Tuple{Int, Int, Int32}}()
+    current_id = Int32(1)
+    for x in 1:W, y in 1:H
+        if hist[y, x] > 10
+            is_max = true
+            for dx in -2:2, dy in -2:2
+                (dx == 0 && dy == 0) && continue
+                nx, ny = x + dx, y + dy
+                if 1 <= nx <= W && 1 <= ny <= H
+                    if hist[ny, nx] > hist[y, x]
+                        is_max = false
+                        break
+                    end
+                end
+            end
+            if is_max
+                push!(seeds, (y, x, current_id))
+                current_id += 1
+            end
+        end
+    end
+    
+    grid = zeros(Int32, H, W)
+    for (sy, sx, id) in seeds
+        for dx in -5:5, dy in -5:5
+            nx, ny = sx + dx, sy + dy
+            if 1 <= nx <= W && 1 <= ny <= H
+                grid[ny, nx] = id
+            end
+        end
+    end
+    
+    masks = zeros(Int32, H, W)
+    for x in 1:W, y in 1:H
+        if iscell[y, x]
+            py = clamp(round(Int, p[1, y, x]), 1, H)
+            px = clamp(round(Int, p[2, y, x]), 1, W)
+            masks[y, x] = grid[py, px]
+        end
+    end
+    
+    if flow_threshold > 0.0
+        remove_bad_flow_masks!(masks, dP; threshold=flow_threshold)
+    end
+    remove_small_masks!(masks; min_size=15)
+
+    return masks
+end
+
+# ==============================================================================
+# 2. IMAGE PROCESSING & INFERENCE 
+# ==============================================================================
 
 function normalize99(img::AbstractArray)
     out = zeros(Float32, size(img))
@@ -182,9 +454,10 @@ function segment(img_path::String, model_path::String; use_gpu::Bool=false)
     println("Loading image from: $img_path ...")
     raw_img = load(img_path)
     
-    if eltype(raw_img) <: Colorant
-        gray_img = Gray.(raw_img) 
-        img_data = Float32.(gray_img)
+    if eltype(raw_img) <: RGB
+        img_data = Float32.(permutedims(channelview(raw_img), (2, 3, 1)))
+    elseif eltype(raw_img) <: Colorant
+        img_data = Float32.(permutedims(channelview(RGB.(raw_img)), (2, 3, 1)))
     else
         img_data = Float32.(raw_img)
     end
@@ -200,7 +473,7 @@ function save_masks(img_path::String, masks::AbstractMatrix{<:Integer}, output_p
     
     println("Salvataggio risultati in corso...")
     
-    # 1. Maschera Analitica (Maschera 16-bit compatibile con QuPath / ImageJ)
+    # 1. Maschera Analitica
     analytical_mask = reinterpret(Gray{N0f16}, UInt16.(masks))
     save(path_analytical, analytical_mask)
     println("  [+] Maschera analitica (16-bit) salvata in: ", path_analytical)
@@ -209,7 +482,6 @@ function save_masks(img_path::String, masks::AbstractMatrix{<:Integer}, output_p
     raw_img = load(img_path)
     H, W = size(masks)
     
-    # FIX DEFINITIVO: Usiamo i colori RGB originali intatti come sfondo!
     overlay = zeros(RGB{Float32}, H, W)
     if eltype(raw_img) <: Colorant
         rgb_img = RGB.(raw_img)
@@ -226,9 +498,12 @@ function save_masks(img_path::String, masks::AbstractMatrix{<:Integer}, output_p
     n_cells = maximum(masks)
     if n_cells > 0
         Random.seed!(42) 
-        colors = [RGB(0.0, 0.0, 0.0)]
+        colors = [RGB{Float32}(0.0f0, 0.0f0, 0.0f0)]
         for _ in 1:n_cells
-            push!(colors, RGB(rand(0.3:1.0), rand(0.3:1.0), rand(0.3:1.0)))
+            r = 0.2f0 + 0.8f0 * rand(Float32)
+            g = 0.2f0 + 0.8f0 * rand(Float32)
+            b = 0.2f0 + 0.8f0 * rand(Float32)
+            push!(colors, RGB{Float32}(r, g, b))
         end
         
         for y in 1:H, x in 1:W
@@ -250,8 +525,7 @@ function save_masks(img_path::String, masks::AbstractMatrix{<:Integer}, output_p
                     overlay[y, x] = c
                 else
                     bg = overlay[y, x]
-                    # Mix: 70% foto rosa originale, 30% colore della cellula
-                    overlay[y, x] = bg * 0.7f0 + c * 0.3f0
+                    overlay[y, x] = bg * 0.6f0 + c * 0.4f0
                 end
             end
         end
