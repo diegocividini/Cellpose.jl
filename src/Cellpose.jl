@@ -196,13 +196,16 @@ function remove_small_masks!(masks::AbstractMatrix{<:Integer}; min_size::Int=15)
 end
 
 function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T}; 
-                        niter::Int=200, cellprob_threshold::Float64=0.0, flow_threshold::Float64=0.4) where T
+                        niter::Int=200, cellprob_threshold::Float64=0.0, 
+                        flow_threshold::Float64=0.4) where T
     
+    println("   --> Following flows...")
     p = follow_flows(dP, niter=niter)
     
     H, W = size(cellprob)
     iscell = cellprob .> cellprob_threshold
     
+    # Istogramma dei punti di convergenza
     hist = zeros(Int32, H, W)
     for x in 1:W, y in 1:H
         if iscell[y, x]
@@ -212,15 +215,21 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         end
     end
     
+    # Trova i semi: massimi locali con soglia dinamica
     seeds = Vector{Tuple{Int, Int, Int32}}()
     current_id = Int32(1)
+    
+    # Soglia dinamica basata sulla densità dei pixel
+    min_hist = max(5, round(Int, 0.01 * sum(iscell)))
+    
     for x in 1:W, y in 1:H
-        if hist[y, x] > 10
+        if hist[y, x] >= min_hist
+            # Verifica che sia un massimo locale (3x3)
             is_max = true
-            for dx in -2:2, dy in -2:2
+            for dy in -1:1, dx in -1:1
                 (dx == 0 && dy == 0) && continue
-                nx, ny = x + dx, y + dy
-                if 1 <= nx <= W && 1 <= ny <= H
+                ny, nx = y + dy, x + dx
+                if 1 <= ny <= H && 1 <= nx <= W
                     if hist[ny, nx] > hist[y, x]
                         is_max = false
                         break
@@ -234,16 +243,48 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         end
     end
     
+    println("   --> Found $(length(seeds)) seed points")
+    
+    # Espandi i semi con label propagation
     grid = zeros(Int32, H, W)
     for (sy, sx, id) in seeds
-        for dx in -5:5, dy in -5:5
-            nx, ny = sx + dx, sy + dy
-            if 1 <= nx <= W && 1 <= ny <= H
+        for dy in -3:3, dx in -3:3
+            ny, nx = sy + dy, sx + dx
+            if 1 <= ny <= H && 1 <= nx <= W
                 grid[ny, nx] = id
             end
         end
     end
     
+    # Label propagation iterativa
+    changed = true
+    iterations = 0
+    while changed && iterations < 50
+        changed = false
+        iterations += 1
+        for y in 1:H, x in 1:W
+            if iscell[y, x] && grid[y, x] == 0
+                neighbor_labels = Int32[]
+                for dy in -1:1, dx in -1:1
+                    ny, nx = y + dy, x + dx
+                    if 1 <= ny <= H && 1 <= nx <= W && grid[ny, nx] > 0
+                        push!(neighbor_labels, grid[ny, nx])
+                    end
+                end
+                if !isempty(neighbor_labels)
+                    counts = Dict{Int32, Int}()
+                    for lbl in neighbor_labels
+                        counts[lbl] = get(counts, lbl, 0) + 1
+                    end
+                    best_label = first(maximum(counts))
+                    grid[y, x] = best_label
+                    changed = true
+                end
+            end
+        end
+    end
+    
+    # Assegna le maschere finali
     masks = zeros(Int32, H, W)
     for x in 1:W, y in 1:H
         if iscell[y, x]
@@ -253,10 +294,25 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         end
     end
     
+    # Post-processing
     if flow_threshold > 0.0
+        println("   --> Removing bad flow masks...")
         remove_bad_flow_masks!(masks, dP; threshold=flow_threshold)
     end
+    
+    println("   --> Removing small masks...")
     remove_small_masks!(masks; min_size=15)
+    
+    # Rinumera le maschere consecutivamente
+    unique_masks = sort(collect(Set(masks[masks .> 0])))
+    if !isempty(unique_masks)
+        mask_map = Dict{Int32, Int32}(old => new for (new, old) in enumerate(unique_masks))
+        for i in eachindex(masks)
+            if masks[i] > 0
+                masks[i] = mask_map[masks[i]]
+            end
+        end
+    end
 
     return masks
 end
@@ -427,11 +483,21 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     
     println("4. Computing dynamic flows (Euler Integration)...")
     
-    # 🟢 LA CHIAVE DELLA STABILITÀ: Riportiamo i flussi alla magnitudine unitaria
-    # Questo previene l'overshoot (il rimbalzo) dei pixel e fa sparire il "rumore"
-    dP_crop ./= 5.0f0 
+    # Normalizza correttamente i flussi
+    println("4. Normalizing flows...")
+    for y in 1:H, x in 1:W
+        mag = sqrt(dP_crop[1, y, x]^2 + dP_crop[2, y, x]^2)
+        if mag > 1e-10
+            dP_crop[1, y, x] /= mag
+            dP_crop[2, y, x] /= mag
+        end
+    end
     
     masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=0.0, flow_threshold=0.4)
+
+    println("dP range: ", extrema(dP_crop))
+    println("cellprob range: ", extrema(cellprob_crop))
+    println("Unique masks before cleanup: ", length(unique(masks[masks .> 0])))
     
     println("Segmentation completed! Found $(maximum(masks)) cells.")
     return masks
@@ -454,7 +520,6 @@ end
 
 function save_masks(img_path::String, masks::AbstractMatrix{<:Integer}, output_path::String)
     base_path = replace(output_path, r"\.(tif|tiff|png|jpg|jpeg)$"i => "")
-    
     path_analytical = base_path * ".tif"
     path_visual = base_path * "_overlay.png"
     
@@ -465,63 +530,76 @@ function save_masks(img_path::String, masks::AbstractMatrix{<:Integer}, output_p
     save(path_analytical, analytical_mask)
     println("  [+] Maschera analitica (16-bit) salvata in: ", path_analytical)
     
-    # 2. Overlay
+    # 2. Overlay ottimizzato
     raw_img = load(img_path)
     H, W = size(masks)
     
-    overlay = zeros(RGB{Float32}, H, W)
-    if eltype(raw_img) <: Colorant
-        rgb_img = RGB.(raw_img)
-        for y in 1:H, x in 1:W
-            overlay[y, x] = rgb_img[y, x]
-        end
+    # Converti immagine originale in RGB{Float32}
+    if eltype(raw_img) <: RGB
+        img_rgb = RGB{Float32}.(raw_img)
+    elseif eltype(raw_img) <: Colorant
+        img_rgb = RGB{Float32}.(RGB.(raw_img))
     else
-        for y in 1:H, x in 1:W
-            v = Float32(raw_img[y, x])
-            overlay[y, x] = RGB(v, v, v)
-        end
+        gray_img = Float32.(raw_img)
+        img_rgb = [RGB{Float32}(v, v, v) for v in gray_img]
     end
     
+    overlay = copy(img_rgb)
     n_cells = maximum(masks)
+    
     if n_cells > 0
-        Random.seed!(42) 
-        colors = [RGB{Float32}(0.0f0, 0.0f0, 0.0f0)]
-        for _ in 1:n_cells
-            r = 0.2f0 + 0.8f0 * rand(Float32)
-            g = 0.2f0 + 0.8f0 * rand(Float32)
-            b = 0.2f0 + 0.8f0 * rand(Float32)
-            push!(colors, RGB{Float32}(r, g, b))
+        # Genera colori distinti usando HSL
+        Random.seed!(42)
+        colors = Vector{RGB{Float32}}(undef, n_cells + 1)
+        colors[1] = RGB{Float32}(0.0f0, 0.0f0, 0.0f0)
+        for i in 1:n_cells
+            hue = (i * 137.508) % 360
+            h_norm = hue / 360.0f0
+            c = HSV(h_norm, 0.8f0, 0.9f0)
+            colors[i + 1] = RGB{Float32}(c)
         end
         
+        # Calcola i bordi in modo efficiente
+        is_boundary = falses(H, W)
+        
+        for dy in -1:1, dx in -1:1
+            (dy == 0 && dx == 0) && continue
+            ny_range = max(1, 1+dy):min(H, H+dy)
+            nx_range = max(1, 1+dx):min(W, W+dx)
+            
+            shifted_masks = zeros(Int32, H, W)
+            shifted_masks[ny_range, nx_range] .= masks[max(1, 1-dy):min(H, H-dy), max(1, 1-dx):min(W, W-dx)]
+            
+            is_boundary .|= (shifted_masks .!= masks)
+        end
+        
+        # Applica colori
         for y in 1:H, x in 1:W
             m = masks[y, x]
             if m > 0
                 c = colors[m + 1]
-                is_boundary = false
-                for dy in -1:1, dx in -1:1
-                    ny, nx = y + dy, x + dx
-                    if 1 <= ny <= H && 1 <= nx <= W
-                        if masks[ny, nx] != m
-                            is_boundary = true
-                            break
-                        end
-                    end
-                end
-                
-                if is_boundary
+                if is_boundary[y, x]
                     overlay[y, x] = c
                 else
-                    bg = overlay[y, x]
-                    overlay[y, x] = bg * 0.6f0 + c * 0.4f0
+                    orig = overlay[y, x]
+                    overlay[y, x] = RGB{Float32}(
+                        0.6f0 * red(orig) + 0.4f0 * red(c),
+                        0.6f0 * green(orig) + 0.4f0 * green(c),
+                        0.6f0 * blue(orig) + 0.4f0 * blue(c)
+                    )
                 end
             end
         end
     end
     
-    overlay_u8 = map(c -> RGB{N0f8}(clamp(red(c), 0.0f0, 1.0f0), clamp(green(c), 0.0f0, 1.0f0), clamp(blue(c), 0.0f0, 1.0f0)), overlay)
+    overlay_u8 = map(c -> RGB{N0f8}(
+        clamp(red(c), 0.0f0, 1.0f0),
+        clamp(green(c), 0.0f0, 1.0f0),
+        clamp(blue(c), 0.0f0, 1.0f0)
+    ), overlay)
     
     save(path_visual, overlay_u8)
-    println("  [+] Overlay visivo (Immagine + Maschere) salvato in: ", path_visual)
+    println("  [+] Overlay visivo salvato in: ", path_visual)
     
     return path_analytical, path_visual
 end
