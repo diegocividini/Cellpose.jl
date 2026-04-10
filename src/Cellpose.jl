@@ -148,10 +148,10 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
         
         out_rev = reshape(out_tensor, (TILE_SIZE, TILE_SIZE, 3, 1))
         
-        # 🟢 ORDINE CORRETTO ASSOLUTO: 1=Prob, 2=Y, 3=X
-        prob_tile = permutedims(out_rev[:, :, 1, 1], (2, 1)) 
-        dy_tile   = permutedims(out_rev[:, :, 2, 1], (2, 1)) 
-        dx_tile   = permutedims(out_rev[:, :, 3, 1], (2, 1)) 
+        # 🟢 IL FIX DELLA VERITÀ (Leggendo il sorgente Python): 1=dY, 2=dX, 3=Prob
+        dy_tile   = permutedims(out_rev[:, :, 1, 1], (2, 1)) 
+        dx_tile   = permutedims(out_rev[:, :, 2, 1], (2, 1)) 
+        prob_tile = permutedims(out_rev[:, :, 3, 1], (2, 1)) 
         
         lock(stitching_lock) do
             cellprob_full[y_start:y_end, x_start:x_end] .+= prob_tile .* window
@@ -173,10 +173,10 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     
     println("4. Computing dynamic flows (Euler Integration)...")
     
-    # 🟢 MOLTIPLICATORE NECESSARIO PER CREARE I "PALLINI PIENI"
-    dP_crop .*= 5.0f0 
+    # 🟢 LA SECONDA VERITÀ: La rete è stata addestrata con flussi 5x. 
+    # Non dobbiamo moltiplicarli di nuovo in Julia. Li passiamo "puri".
     
-    # 🟢 SOGLIE STANDARD DI CELLPOSE (0.0 E 0.4)
+    # 🟢 LA TERZA VERITÀ: Threshold=0.0 è corretto per i logits di default.
     masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=0.0, flow_threshold=0.4)
     
     println("Segmentation completed! Found $(maximum(masks)) cells.")
@@ -187,8 +187,10 @@ function segment(img_path::String, model_path::String; use_gpu::Bool=false)
     println("Loading image from: $img_path ...")
     raw_img = load(img_path)
     
+    # EMULA EXACTLY "channels=[0,0]" DI PYTHON (Forza tutto a scala di grigi)
     if eltype(raw_img) <: Colorant
-        img_data = Float32.(permutedims(channelview(raw_img), (2, 3, 1)))
+        gray_img = Gray.(raw_img) # Converte RGB in Scala di Grigi
+        img_data = Float32.(gray_img)
     else
         img_data = Float32.(raw_img)
     end
