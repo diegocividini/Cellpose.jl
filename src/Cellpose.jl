@@ -79,7 +79,7 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
         model = load_inference(model_path)
     end
     
-    TILE_SIZE = 256 # Riportato a 256 (Dimensione statica del modello)
+    TILE_SIZE = 256 
     TILE_OVERLAP = 0.1
     STRIDE = round(Int, TILE_SIZE * (1.0 - TILE_OVERLAP)) 
     
@@ -172,9 +172,11 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     
     println("4. Computing dynamic flows (Euler Integration)...")
     
-    # Moltiplicatore 5.0 RIMOSSO. cpsam.onnx ha già i flussi scalati!
+    # FIX: Ridiamo velocità ai flussi per farli aggregare al centro
+    dP_crop .*= 5.0f0 
     
-    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=0.0, flow_threshold=0.4)
+    # FIX: Disabilitiamo il filtro flow_threshold (0.0) per non far cancellare le cellule buone!
+    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=0.0, flow_threshold=0.0)
     
     println("Segmentation completed! Found $(maximum(masks)) cells.")
     return masks
@@ -209,7 +211,6 @@ function save_masks(img_path::String, masks::AbstractMatrix{<:Integer}, output_p
     # 2. Overlay
     raw_img = load(img_path)
     
-    # Check di sicurezza per estrarre la matrice dati pura indipendentemente dai colori
     if eltype(raw_img) <: RGB
         img_data = Float32.(permutedims(channelview(raw_img), (2, 3, 1)))
     elseif eltype(raw_img) <: Colorant
@@ -266,7 +267,10 @@ function save_masks(img_path::String, masks::AbstractMatrix{<:Integer}, output_p
         end
     end
     
-    save(path_visual, overlay)
+    # FIX: Converte forzatamente i colori a 8-bit per non corrompere il PNG!
+    overlay_u8 = map(c -> RGB{N0f8}(clamp(red(c), 0.0f0, 1.0f0), clamp(green(c), 0.0f0, 1.0f0), clamp(blue(c), 0.0f0, 1.0f0)), overlay)
+    
+    save(path_visual, overlay_u8)
     println("  [+] Overlay visivo (Immagine + Maschere) salvato in: ", path_visual)
     
     return path_analytical, path_visual
