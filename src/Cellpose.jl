@@ -442,22 +442,41 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     stitching_lock = ReentrantLock()
     tiles_coords = [(y, x) for y in y_starts for x in x_starts]
     
-    Threads.@threads for (y_start, x_start) in tiles_coords
+        Threads.@threads for (y_start, x_start) in tiles_coords
+        y_end = y_start + TILE_SIZE - 1
+        x_end = x_start + TILE_SIZE - 1
+        
+        # 1. Estrai la tile dall'immagine padded
+        if ndims(img_padded) == 2
+            tile = img_padded[y_start:y_end, x_start:x_end]
+        else
+            tile = img_padded[y_start:y_end, x_start:x_end, :]
+        end
+        
+        # 2. Prepara il tensore NCHW per ONNX
+        input_tensor = prepare_tensor(tile)
+        
+        # 3. Esegui inference
         outputs = model(Dict("input_image" => input_tensor))
         out_tensor = outputs["flows_and_probs"]
-
-        # 🔍 DEBUG: Verifica che il formato sia NCHW (1, 3, H, W)
+        
+        # 🔍 Verifica formato (deve essere NCHW: 1 batch, 3 canali, H, W)
         if size(out_tensor, 2) != 3
             error("⚠️ Formato ONNX inatteso: $(size(out_tensor)). Atteso (1, 3, H, W)")
         end
-
-        # Estrazione corretta: Canale 1=dy, Canale 2=dx, Canale 3=cellprob
+        
+        # 4. Estrai canali direttamente (più veloce e sicuro di reshape+permutedims)
         dy_tile   = out_tensor[1, 1, :, :]
         dx_tile   = out_tensor[1, 2, :, :]
         prob_tile = out_tensor[1, 3, :, :]
-
-        # Verifica immediata dei range (opzionale ma utile)
-        # println("   --> tile prob range: ", extrema(prob_tile))
+        
+        # 5. Accumula con pesatura e thread-safety
+        lock(stitching_lock) do
+            cellprob_full[y_start:y_end, x_start:x_end] .+= prob_tile .* window
+            dP_full[1, y_start:y_end, x_start:x_end] .+= dy_tile .* window
+            dP_full[2, y_start:y_end, x_start:x_end] .+= dx_tile .* window
+            weight_sum[y_start:y_end, x_start:x_end] .+= window
+        end
     end
     
     println("3. Normalizing borders and applying final crop...")
