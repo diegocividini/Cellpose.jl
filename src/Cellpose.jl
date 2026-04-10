@@ -443,32 +443,21 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     tiles_coords = [(y, x) for y in y_starts for x in x_starts]
     
     Threads.@threads for (y_start, x_start) in tiles_coords
-        y_end = y_start + TILE_SIZE - 1
-        x_end = x_start + TILE_SIZE - 1
-        
-        if ndims(img_padded) == 2
-            tile = img_padded[y_start:y_end, x_start:x_end]
-        else
-            tile = img_padded[y_start:y_end, x_start:x_end, :]
-        end
-        
-        input_tensor = prepare_tensor(tile)
-        
         outputs = model(Dict("input_image" => input_tensor))
         out_tensor = outputs["flows_and_probs"]
-        
-        out_rev = reshape(out_tensor, (TILE_SIZE, TILE_SIZE, 3, 1))
-        
-        dy_tile   = permutedims(out_rev[:, :, 1, 1], (2, 1)) 
-        dx_tile   = permutedims(out_rev[:, :, 2, 1], (2, 1)) 
-        prob_tile = permutedims(out_rev[:, :, 3, 1], (2, 1)) 
-        
-        lock(stitching_lock) do
-            cellprob_full[y_start:y_end, x_start:x_end] .+= prob_tile .* window
-            dP_full[1, y_start:y_end, x_start:x_end] .+= dy_tile .* window
-            dP_full[2, y_start:y_end, x_start:x_end] .+= dx_tile .* window
-            weight_sum[y_start:y_end, x_start:x_end] .+= window
+
+        # 🔍 DEBUG: Verifica che il formato sia NCHW (1, 3, H, W)
+        if size(out_tensor, 2) != 3
+            error("⚠️ Formato ONNX inatteso: $(size(out_tensor)). Atteso (1, 3, H, W)")
         end
+
+        # Estrazione corretta: Canale 1=dy, Canale 2=dx, Canale 3=cellprob
+        dy_tile   = out_tensor[1, 1, :, :]
+        dx_tile   = out_tensor[1, 2, :, :]
+        prob_tile = out_tensor[1, 3, :, :]
+
+        # Verifica immediata dei range (opzionale ma utile)
+        # println("   --> tile prob range: ", extrema(prob_tile))
     end
     
     println("3. Normalizing borders and applying final crop...")
@@ -484,15 +473,17 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     println("4. Computing dynamic flows (Euler Integration)...")
     
     # Normalizza correttamente i flussi
-    println("4. Normalizing flows...")
-    for y in 1:H, x in 1:W
-        mag = sqrt(dP_crop[1, y, x]^2 + dP_crop[2, y, x]^2)
-        if mag > 1e-10
-            dP_crop[1, y, x] /= mag
-            dP_crop[2, y, x] /= mag
-        end
-    end
-    
+    println("4. Scaling flows for dynamics (Cellpose standard)...")
+    # Cellpose calibration: i flussi sono addestrati con scala ~5.0
+    dP_crop ./= 5.0f0
+
+    # Opzionale: clip di sicurezza per evitare valori estremi da artefatti ONNX
+    clamp!(cellprob_crop, -10.0f0, 10.0f0)
+
+    println("📊 dP range after scaling: ", extrema(dP_crop))
+    println("📊 cellprob range: ", extrema(cellprob_crop))
+    println("📊 % cell pixels (>0.0): ", sum(cellprob_crop .> 0.0) / length(cellprob_crop) * 100)
+
     masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=0.0, flow_threshold=0.4)
 
     println("dP range: ", extrema(dP_crop))
