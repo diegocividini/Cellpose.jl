@@ -215,16 +215,13 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         end
     end
     
-    # Trova i semi: massimi locali con soglia dinamica
+    # 1. Trova i semi (Soglia ridotta a 5 per catturare più cellule)
     seeds = Vector{Tuple{Int, Int, Int32}}()
     current_id = Int32(1)
-    
-    # Soglia fissa come cellpose python
-    min_hist = 10
+    min_hist = 5 
     
     for x in 1:W, y in 1:H
         if hist[y, x] >= min_hist
-            # Verifica che sia un massimo locale (3x3)
             is_max = true
             for dy in -1:1, dx in -1:1
                 (dx == 0 && dy == 0) && continue
@@ -245,10 +242,12 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
     
     println("   --> Found $(length(seeds)) seed points")
     
-    # Espandi i semi con label propagation
+    # 2. Inizializza la griglia
     grid = zeros(Int32, H, W)
+    
+    # Espandi i semi con raggio ridotto (2 pixel)
     for (sy, sx, id) in seeds
-        for dy in -3:3, dx in -3:3
+        for dy in -2:2, dx in -2:2  
             ny, nx = sy + dy, sx + dx
             if 1 <= ny <= H && 1 <= nx <= W
                 grid[ny, nx] = id
@@ -256,15 +255,16 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         end
     end
     
-    # Label propagation iterativa
     changed = true
     iterations = 0
     while changed && iterations < 50
         changed = false
         iterations += 1
         for y in 1:H, x in 1:W
+            # Se il pixel è una cellula ma non ha ancora un ID (grid == 0)
             if iscell[y, x] && grid[y, x] == 0
                 neighbor_labels = Int32[]
+                # Guarda i vicini per trovare un ID
                 for dy in -1:1, dx in -1:1
                     ny, nx = y + dy, x + dx
                     if 1 <= ny <= H && 1 <= nx <= W && grid[ny, nx] > 0
@@ -272,6 +272,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
                     end
                 end
                 if !isempty(neighbor_labels)
+                    # Prendi l'ID più frequente tra i vicini
                     counts = Dict{Int32, Int}()
                     for lbl in neighbor_labels
                         counts[lbl] = get(counts, lbl, 0) + 1
@@ -284,7 +285,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         end
     end
     
-    # Assegna le maschere finali
+    # 4. Assegna le maschere finali
     masks = zeros(Int32, H, W)
     for x in 1:W, y in 1:H
         if iscell[y, x]
@@ -496,7 +497,7 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     println("4. Computing dynamic flows (Euler Integration)...")
     
     # Normalizza correttamente i flussi
-    println("4. Scaling flows for dynamics (Cellpose standard)...")
+    println("5. Scaling flows for dynamics (Cellpose standard)...")
     # Cellpose calibration: i flussi sono addestrati con scala ~5.0
     dP_crop ./= 5.0f0
 
