@@ -507,7 +507,7 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     println("📊 cellprob range: ", extrema(cellprob_crop))
     println("📊 % cell pixels (>0.0): ", sum(cellprob_crop .> 0.0) / length(cellprob_crop) * 100)
 
-    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=-0.2, flow_threshold=0.4)
+    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=-1.5, flow_threshold=0.4)
 
     println("dP range: ", extrema(dP_crop))
     println("cellprob range: ", extrema(cellprob_crop))
@@ -561,17 +561,17 @@ function save_masks(img_path::String, masks::AbstractMatrix{<:Integer}, output_p
     n_cells = maximum(masks)
     
     if n_cells > 0
-        # 🟢 Palette verde-blu per massimo contrasto su H&E
+        # 🟢 PALETTE FREDDA (Verde/Blu) per massimo contrasto su H&E
         colors = Vector{RGB{Float32}}(undef, n_cells + 1)
         colors[1] = RGB{Float32}(0.0f0, 0.0f0, 0.0f0)
         
         for i in 1:n_cells
-            # Angolo aureo per distribuzione uniforme
-            hue = (i * 137.508) % 360
-            #  Sposta tutto nel range verde-blu (120°-240°)
-            hue_shifted = 120.0f0 + (hue / 360.0f0) * 120.0f0
-            h_norm = hue_shifted / 360.0f0
-            c = HSV(h_norm, 0.85f0, 0.9f0)
+            # Usa l'angolo aureo ma shiftato nel range 120°-300° (Verde -> Ciano -> Blu)
+            # Evitiamo deliberatamente il Rosso (0°-60°) che si mimetizza col tessuto
+            hue = 120.0f0 + (i * 137.508) % 180.0f0
+            
+            # Saturazione alta (0.85) e Valore alto (0.9) per colori vivaci
+            c = HSV(hue, 0.85f0, 0.9f0)
             colors[i + 1] = RGB{Float32}(c)
         end
         
