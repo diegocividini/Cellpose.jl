@@ -507,7 +507,7 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     println("📊 cellprob range: ", extrema(cellprob_crop))
     println("📊 % cell pixels (>0.0): ", sum(cellprob_crop .> 0.0) / length(cellprob_crop) * 100)
 
-    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=0.0, flow_threshold=0.4)
+    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=-0.2, flow_threshold=0.4)
 
     println("dP range: ", extrema(dP_crop))
     println("cellprob range: ", extrema(cellprob_crop))
@@ -544,11 +544,10 @@ function save_masks(img_path::String, masks::AbstractMatrix{<:Integer}, output_p
     save(path_analytical, analytical_mask)
     println("  [+] Maschera analitica (16-bit) salvata in: ", path_analytical)
     
-    # 2. Overlay ottimizzato
+    # 2. Overlay ottimizzato per H&E
     raw_img = load(img_path)
     H, W = size(masks)
     
-    # Converti immagine originale in RGB{Float32}
     if eltype(raw_img) <: RGB
         img_rgb = RGB{Float32}.(raw_img)
     elseif eltype(raw_img) <: Colorant
@@ -562,18 +561,21 @@ function save_masks(img_path::String, masks::AbstractMatrix{<:Integer}, output_p
     n_cells = maximum(masks)
     
     if n_cells > 0
-        # Genera colori distinti usando HSL
-        Random.seed!(42)
+        # 🟢 Palette verde-blu per massimo contrasto su H&E
         colors = Vector{RGB{Float32}}(undef, n_cells + 1)
         colors[1] = RGB{Float32}(0.0f0, 0.0f0, 0.0f0)
+        
         for i in 1:n_cells
+            # Angolo aureo per distribuzione uniforme
             hue = (i * 137.508) % 360
-            h_norm = hue / 360.0f0
-            c = HSV(h_norm, 0.8f0, 0.9f0)
+            #  Sposta tutto nel range verde-blu (120°-240°)
+            hue_shifted = 120.0f0 + (hue / 360.0f0) * 120.0f0
+            h_norm = hue_shifted / 360.0f0
+            c = HSV(h_norm, 0.85f0, 0.9f0)
             colors[i + 1] = RGB{Float32}(c)
         end
         
-        # Calcola i bordi in modo efficiente
+        # Calcola bordi in modo efficiente
         is_boundary = falses(H, W)
         
         for dy in -1:1, dx in -1:1
@@ -596,10 +598,11 @@ function save_masks(img_path::String, masks::AbstractMatrix{<:Integer}, output_p
                     overlay[y, x] = c
                 else
                     orig = overlay[y, x]
+                    # 🟢 Blending più trasparente per vedere meglio il tessuto
                     overlay[y, x] = RGB{Float32}(
-                        0.6f0 * red(orig) + 0.4f0 * red(c),
-                        0.6f0 * green(orig) + 0.4f0 * green(c),
-                        0.6f0 * blue(orig) + 0.4f0 * blue(c)
+                        0.65f0 * red(orig) + 0.35f0 * red(c),
+                        0.65f0 * green(orig) + 0.35f0 * green(c),
+                        0.65f0 * blue(orig) + 0.35f0 * blue(c)
                     )
                 end
             end
