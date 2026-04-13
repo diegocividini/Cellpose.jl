@@ -184,9 +184,10 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
     H, W = size(cellprob)
     iscell = cellprob .> cellprob_threshold
     
+    dP_dyn = copy(dP) ./ 5.0f0
     println("   --> Following flows...")
     # ✅ dP è già scalato da 5.0 nel segmento, passalo direttamente
-    p = follow_flows(dP, niter=niter)
+    p = follow_flows(dP_dyn, niter=niter)
     
     hist = zeros(Int32, H, W)
     @inbounds for x in 1:W, y in 1:H
@@ -255,7 +256,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
     
     if flow_threshold > 0.0
         println("   --> Removing bad flow masks...")
-        remove_bad_flow_masks!(masks, dP; threshold=flow_threshold)
+        remove_bad_flow_masks!(masks, dP_dyn; threshold=flow_threshold)
     end
     println("   --> Removing small masks...")
     remove_small_masks!(masks; min_size=15)
@@ -401,7 +402,7 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     println("📊 % cell pixels (>0.0): ", sum(cellprob_crop .> 0.0f0) / length(cellprob_crop) * 100)
 
     # ✅ Soglia standard Cellpose + scaling corretto
-    masks = compute_masks(dP_crop ./ 5.0f0, cellprob_crop; niter=200, cellprob_threshold=-0.5, flow_threshold=0.8)
+    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=-0.5, flow_threshold=0.8)
     
     println("dP range: ", extrema(dP_crop))
     println("cellprob range: ", extrema(cellprob_crop))
