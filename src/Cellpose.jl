@@ -49,71 +49,74 @@ function masks_to_flows(masks::AbstractMatrix{<:Integer})
         return mu
     end
     
-    valid_pixels = Tuple{Int, Int, Int}[] 
-    coords_dict = Dict{Int, Vector{Tuple{Int, Int}}}()
+    # Ottimizzazione: Usare array invece di Dict per i centri
+    centers_y = zeros(Int, n_masks)
+    centers_x = zeros(Int, n_masks)
+    counts = zeros(Int, n_masks)
+    
+    # Preallocazione per evitare riallocazioni dinamiche
+    valid_pixels = Tuple{Int, Int, Int}[]
+    sizehint!(valid_pixels, H * W ÷ 4) 
     
     for y in 2:H-1, x in 2:W-1
         m = masks[y, x]
         if m > 0
             push!(valid_pixels, (y, x, m))
-            if !haskey(coords_dict, m)
-                coords_dict[m] = Tuple{Int, Int}[]
-            end
-            push!(coords_dict[m], (y, x))
+            centers_y[m] += y
+            centers_x[m] += x
+            counts[m] += 1
         end
     end
     
-    centers = fill((0, 0), n_masks)
-    for i in 1:n_masks
-        if !haskey(coords_dict, i)
-            continue
+    # Calcolo dei centroidi
+    for m in 1:n_masks
+        if counts[m] > 0
+            centers_y[m] = round(Int, centers_y[m] / counts[m])
+            centers_x[m] = round(Int, centers_x[m] / counts[m])
         end
-        coords = coords_dict[i]
-        sum_y = sum(c[1] for c in coords)
-        sum_x = sum(c[2] for c in coords)
-        mean_y = round(Int, sum_y / length(coords))
-        mean_x = round(Int, sum_x / length(coords))
-        
-        min_dist = Inf
-        center = coords[1]
-        for c in coords
-            dist = (c[1] - mean_y)^2 + (c[2] - mean_x)^2
-            if dist < min_dist
-                min_dist = dist
-                center = c
-            end
-        end
-        centers[i] = center
     end
     
-    n_iter = 200 
+    n_iter = 50 
     T_new = zeros(Float32, H, W)
     
     for iter in 1:n_iter
-        for i in 1:n_masks
-            cy, cx = centers[i]
-            if cy != 0
+        # Aggiungi "calore" ai centri
+        for m in 1:n_masks
+            cy, cx = centers_y[m], centers_x[m]
+            if cy > 0 && cx > 0
                 T[cy, cx] += 1.0f0
             end
         end
         
+        # Diffusione
         for (y, x, m) in valid_pixels
-            s = 0.0f0
+            # Somma valori vicini (unrolling manuale per velocità)
+            # Siccome valid_pixels è generato da 2:H-1, siamo sicuri che y-1 e y+1 esistano
+            s = T[y-1, x-1] + T[y-1, x] + T[y-1, x+1] +
+                T[y,   x-1]                + T[y,   x+1] +
+                T[y+1, x-1] + T[y+1, x] + T[y+1, x+1]
+            
+            # Conta vicini con stessa maschera
             c = 0
-            for dy in -1:1, dx in -1:1
-                if masks[y+dy, x+dx] == m
-                    s += T[y+dy, x+dx]
-                    c += 1
-                end
-            end
-            T_new[y, x] = s / c
+            if masks[y-1, x-1] == m; c += 1; end
+            if masks[y-1, x]   == m; c += 1; end
+            if masks[y-1, x+1] == m; c += 1; end
+            if masks[y,   x-1] == m; c += 1; end
+            if masks[y,   x+1] == m; c += 1; end
+            if masks[y+1, x-1] == m; c += 1; end
+            if masks[y+1, x]   == m; c += 1; end
+            if masks[y+1, x+1] == m; c += 1; end
+            
+            T_new[y, x] = c > 0 ? s / c : T[y, x]
         end
         
+        # Aggiorna T
         for (y, x, m) in valid_pixels
             T[y, x] = T_new[y, x]
         end
     end
     
+    # Calcolo gradienti finali
     for (y, x, m) in valid_pixels
         dy = T[y+1, x] - T[y-1, x]
         dx = T[y, x+1] - T[y, x-1]
@@ -215,7 +218,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         end
     end
     
-    # 1. Trova i semi (Soglia ridotta a 5 per catturare più cellule)
+    # 1. Trova i semi
     seeds = Vector{Tuple{Int, Int, Int32}}()
     current_id = Int32(1)
     min_hist = 5 
@@ -245,7 +248,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
     # 2. Inizializza la griglia
     grid = zeros(Int32, H, W)
     
-    # Espandi i semi con raggio ridotto (2 pixel)
+    # Espandi i semi
     for (sy, sx, id) in seeds
         for dy in -2:2, dx in -2:2  
             ny, nx = sy + dy, sx + dx
@@ -255,29 +258,40 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         end
     end
     
+    # 3. Label Propagation Ottimizzata (Zero Allocations)
     changed = true
     iterations = 0
     while changed && iterations < 50
         changed = false
         iterations += 1
-        for y in 1:H, x in 1:W
-            # Se il pixel è una cellula ma non ha ancora un ID (grid == 0)
+        # Itera solo sui pixel interni per evitare check bounds e guadagnare velocità
+        for y in 2:H-1, x in 2:W-1
             if iscell[y, x] && grid[y, x] == 0
-                neighbor_labels = Int32[]
-                # Guarda i vicini per trovare un ID
-                for dy in -1:1, dx in -1:1
-                    ny, nx = y + dy, x + dx
-                    if 1 <= ny <= H && 1 <= nx <= W && grid[ny, nx] > 0
-                        push!(neighbor_labels, grid[ny, nx])
+                # Leggi i 8 vicini direttamente
+                n1 = grid[y-1, x-1]; n2 = grid[y-1, x]; n3 = grid[y-1, x+1]
+                n4 = grid[y,   x-1];                n5 = grid[y,   x+1]
+                n6 = grid[y+1, x-1]; n7 = grid[y+1, x]; n8 = grid[y+1, x+1]
+                
+                # Trova il label più frequente senza usare Dict o Array
+                best_label = Int32(0)
+                max_count = 0
+                
+                # Conteggio manuale (molto più veloce di Dict per 8 elementi)
+                vals = (n1, n2, n3, n4, n5, n6, n7, n8)
+                for v in vals
+                    if v > 0
+                        c = 0
+                        for vv in vals
+                            if vv == v; c += 1; end
+                        end
+                        if c > max_count
+                            max_count = c
+                            best_label = v
+                        end
                     end
                 end
-                if !isempty(neighbor_labels)
-                    # Prendi l'ID più frequente tra i vicini
-                    counts = Dict{Int32, Int}()
-                    for lbl in neighbor_labels
-                        counts[lbl] = get(counts, lbl, 0) + 1
-                    end
-                    best_label = first(maximum(counts))
+                
+                if best_label > 0
                     grid[y, x] = best_label
                     changed = true
                 end
