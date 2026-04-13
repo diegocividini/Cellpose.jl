@@ -202,13 +202,17 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
                         niter::Int=200, cellprob_threshold::Float64=0.0, 
                         flow_threshold::Float64=0.4) where T
     
-    println("   --> Following flows...")
-    p = follow_flows(dP, niter=niter)
-    
     H, W = size(cellprob)
     iscell = cellprob .> cellprob_threshold
     
-    # Istogramma dei punti di convergenza
+    # Python: dP * (cellprob > cellprob_threshold) / 5.
+    dP_dyn = copy(dP) ./ 5.0f0
+    dP_dyn[:, .!iscell] .= 0.0f0  # Azzera flussi nello sfondo
+    
+    println("   --> Following flows...")
+    p = follow_flows(dP_dyn, niter=niter)
+    
+    # Istogramma convergenza (get_masks_torch in Python)
     hist = zeros(Int32, H, W)
     for x in 1:W, y in 1:H
         if iscell[y, x]
@@ -218,10 +222,10 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         end
     end
     
-    # 1. Trova i semi
+    # Trova semi (Python usa soglia fissa 10)
     seeds = Vector{Tuple{Int, Int, Int32}}()
     current_id = Int32(1)
-    min_hist = 5 
+    min_hist = 10  # ✅ RIPRISTINATO A 10
     
     for x in 1:W, y in 1:H
         if hist[y, x] >= min_hist
@@ -229,11 +233,8 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
             for dy in -1:1, dx in -1:1
                 (dx == 0 && dy == 0) && continue
                 ny, nx = y + dy, x + dx
-                if 1 <= ny <= H && 1 <= nx <= W
-                    if hist[ny, nx] > hist[y, x]
-                        is_max = false
-                        break
-                    end
+                if 1 <= ny <= H && 1 <= nx <= W && hist[ny, nx] > hist[y, x]
+                    is_max = false; break
                 end
             end
             if is_max
@@ -245,52 +246,34 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
     
     println("   --> Found $(length(seeds)) seed points")
     
-    # 2. Inizializza la griglia
+    # Inizializza griglia e propaga label
     grid = zeros(Int32, H, W)
-    
-    # Espandi i semi
     for (sy, sx, id) in seeds
-        for dy in -2:2, dx in -2:2  
-            ny, nx = sy + dy, sx + dx
-            if 1 <= ny <= H && 1 <= nx <= W
-                grid[ny, nx] = id
-            end
-        end
+        grid[sy, sx] = id
     end
     
-    # 3. Label Propagation Ottimizzata (Zero Allocations)
     changed = true
-    iterations = 0
-    while changed && iterations < 50
+    iter = 0
+    while changed && iter < 20
         changed = false
-        iterations += 1
-        # Itera solo sui pixel interni per evitare check bounds e guadagnare velocità
+        iter += 1
         for y in 2:H-1, x in 2:W-1
             if iscell[y, x] && grid[y, x] == 0
-                # Leggi i 8 vicini direttamente
-                n1 = grid[y-1, x-1]; n2 = grid[y-1, x]; n3 = grid[y-1, x+1]
-                n4 = grid[y,   x-1];                n5 = grid[y,   x+1]
-                n6 = grid[y+1, x-1]; n7 = grid[y+1, x]; n8 = grid[y+1, x+1]
-                
-                # Trova il label più frequente senza usare Dict o Array
                 best_label = Int32(0)
                 max_count = 0
-                
-                # Conteggio manuale (molto più veloce di Dict per 8 elementi)
-                vals = (n1, n2, n3, n4, n5, n6, n7, n8)
-                for v in vals
-                    if v > 0
-                        c = 0
-                        for vv in vals
-                            if vv == v; c += 1; end
+                for dy in -1:1, dx in -1:1
+                    lbl = grid[y+dy, x+dx]
+                    if lbl > 0
+                        c = 1
+                        for dy2 in -1:1, dx2 in -1:1
+                            if grid[y+dy2, x+dx2] == lbl; c += 1; end
                         end
                         if c > max_count
                             max_count = c
-                            best_label = v
+                            best_label = lbl
                         end
                     end
                 end
-                
                 if best_label > 0
                     grid[y, x] = best_label
                     changed = true
@@ -299,7 +282,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         end
     end
     
-    # 4. Assegna le maschere finali
+    # Assegna maschere finali mappando posizioni finali ai semi
     masks = zeros(Int32, H, W)
     for x in 1:W, y in 1:H
         if iscell[y, x]
@@ -314,21 +297,18 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         println("   --> Removing bad flow masks...")
         remove_bad_flow_masks!(masks, dP; threshold=flow_threshold)
     end
-    
     println("   --> Removing small masks...")
     remove_small_masks!(masks; min_size=15)
     
-    # Rinumera le maschere consecutivamente
-    unique_masks = sort(collect(Set(masks[masks .> 0])))
-    if !isempty(unique_masks)
-        mask_map = Dict{Int32, Int32}(old => new for (new, old) in enumerate(unique_masks))
+    # Rinumera consecutivamente
+    uniq = sort!(collect(Set(masks[masks .> 0])))
+    if !isempty(uniq)
+        id_map = Dict(uniq[i] => Int32(i) for i in 1:length(uniq))
         for i in eachindex(masks)
-            if masks[i] > 0
-                masks[i] = mask_map[masks[i]]
-            end
+            masks[i] = masks[i] > 0 ? id_map[masks[i]] : 0
         end
     end
-
+    
     return masks
 end
 
@@ -513,7 +493,7 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     # Normalizza correttamente i flussi
     println("5. Scaling flows for dynamics (Cellpose standard)...")
     # Cellpose calibration: i flussi sono addestrati con scala ~5.0
-    dP_crop ./= 5.0f0
+    # dP_crop ./= 5.0f0
 
     # Opzionale: clip di sicurezza per evitare valori estremi da artefatti ONNX
     clamp!(cellprob_crop, -10.0f0, 10.0f0)
@@ -522,7 +502,7 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     println("📊 cellprob range: ", extrema(cellprob_crop))
     println("📊 % cell pixels (>0.0): ", sum(cellprob_crop .> 0.0) / length(cellprob_crop) * 100)
 
-    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=-1.5, flow_threshold=0.4)
+    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=0.0, flow_threshold=0.4)
 
     println("dP range: ", extrema(dP_crop))
     println("cellprob range: ", extrema(cellprob_crop))
