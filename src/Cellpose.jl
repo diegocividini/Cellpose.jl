@@ -180,7 +180,7 @@ end
 
 function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T}; 
                         niter::Int=200, cellprob_threshold::Float64=-0.5, 
-                        flow_threshold::Float64=0.8) where T
+                        flow_threshold::Float64=1.0) where T  # ✅ AUMENTATO A 1.0
     H, W = size(cellprob)
     iscell = cellprob .> cellprob_threshold
     
@@ -199,7 +199,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
     
     seeds = Vector{Tuple{Int, Int, Int32}}()
     current_id = Int32(1)
-    min_hist = 8  # AUMENTATO DA 5 A 8 PER RIDURRE SEMI SPURII
+    min_hist = 8
     
     @inbounds for x in 1:W, y in 1:H
         if hist[y, x] >= min_hist
@@ -220,31 +220,27 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
     println("   --> Found $(length(seeds)) seed points")
     
     grid = zeros(Int32, H, W)
-    for (sy, sx, id) in seeds; grid[sy, sx] = id; end
+    # PROPAGAZIONE BFS A CODA (O(N), convergenza garantita, zero Dict)
+    queue = Vector{Tuple{Int, Int}}(undef, sum(iscell))
+    head = 1; tail = 0
     
-    # PROPAGAZIONE CORRETTA CON VOTO A MAGGIORANZA
-    changed = true
-    iter = 0
-    while changed && iter < 200 
-        changed = false
-        iter += 1
-        @inbounds for y in 2:H-1, x in 2:W-1
-            if iscell[y, x] && grid[y, x] == 0
-                # Conta le occorrenze di ogni label nei vicini
-                label_counts = Dict{Int32, Int}()
-                for dy in -1:1, dx in -1:1
-                    lbl = grid[y+dy, x+dx]
-                    if lbl > 0
-                        label_counts[lbl] = get(label_counts, lbl, 0) + 1
-                    end
-                end
-                
-                # Trova la label più frequente
-                if !isempty(label_counts)
-                    best_label = first(maximum(label_counts))
-                    grid[y, x] = best_label
-                    changed = true
-                end
+    for (sy, sx, id) in seeds
+        grid[sy, sx] = id
+        tail += 1
+        queue[tail] = (sy, sx)
+    end
+    
+    @inbounds while head <= tail
+        y, x = queue[head]
+        head += 1
+        lbl = grid[y, x]
+        
+        for dy in -1:1, dx in -1:1
+            ny, nx = y + dy, x + dx
+            if 1 <= ny <= H && 1 <= nx <= W && iscell[ny, nx] && grid[ny, nx] == 0
+                grid[ny, nx] = lbl
+                tail += 1
+                queue[tail] = (ny, nx)
             end
         end
     end
