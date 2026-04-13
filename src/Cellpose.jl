@@ -186,7 +186,6 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
     
     dP_dyn = copy(dP) ./ 5.0f0
     println("   --> Following flows...")
-    # ✅ dP è già scalato da 5.0 nel segmento, passalo direttamente
     p = follow_flows(dP_dyn, niter=niter)
     
     hist = zeros(Int32, H, W)
@@ -200,7 +199,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
     
     seeds = Vector{Tuple{Int, Int, Int32}}()
     current_id = Int32(1)
-    min_hist = 5 
+    min_hist = 8  # AUMENTATO DA 5 A 8 PER RIDURRE SEMI SPURII
     
     @inbounds for x in 1:W, y in 1:H
         if hist[y, x] >= min_hist
@@ -223,22 +222,27 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
     grid = zeros(Int32, H, W)
     for (sy, sx, id) in seeds; grid[sy, sx] = id; end
     
-    # ✅ Propagazione iterativa stabile (senza Dict)
+    # PROPAGAZIONE CORRETTA CON VOTO A MAGGIORANZA
     changed = true
     iter = 0
-    while changed && iter < 100
+    while changed && iter < 200 
         changed = false
         iter += 1
         @inbounds for y in 2:H-1, x in 2:W-1
             if iscell[y, x] && grid[y, x] == 0
-                best = Int32(0)
-                max_c = 0
+                # Conta le occorrenze di ogni label nei vicini
+                label_counts = Dict{Int32, Int}()
                 for dy in -1:1, dx in -1:1
                     lbl = grid[y+dy, x+dx]
-                    lbl > 0 && (max_c += 1; best = lbl)
+                    if lbl > 0
+                        label_counts[lbl] = get(label_counts, lbl, 0) + 1
+                    end
                 end
-                if best > 0
-                    grid[y, x] = best
+                
+                # Trova la label più frequente
+                if !isempty(label_counts)
+                    best_label = first(maximum(label_counts))
+                    grid[y, x] = best_label
                     changed = true
                 end
             end
@@ -261,7 +265,6 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
     println("   --> Removing small masks...")
     remove_small_masks!(masks; min_size=15)
     
-    # Rinumera consecutivamente
     uniq = sort!(collect(Set(masks[masks .> 0])))
     if !isempty(uniq)
         id_map = Dict(uniq[i] => Int32(i) for i in 1:length(uniq))
