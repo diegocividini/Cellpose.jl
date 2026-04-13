@@ -17,22 +17,57 @@ function follow_flows(dP::AbstractArray{T, 3}; niter::Int=200) where T
     _, H, W = size(dP)
     p = zeros(Float32, 2, H, W)
     
+    # Inizializza posizioni
     for x in 1:W, y in 1:H
-        p[1, y, x] = y
-        p[2, y, x] = x
+        p[1, y, x] = Float32(y)
+        p[2, y, x] = Float32(x)
     end
     
-    # Integrazione di Eulero: i pixel si muovono dolcemente
+    # Views per accesso veloce alla memoria
+    dP_1 = @view dP[1, :, :]
+    dP_2 = @view dP[2, :, :]
+    p_1 = @view p[1, :, :]
+    p_2 = @view p[2, :, :]
+
     for i in 1:niter
         for x in 1:W, y in 1:H
-            py = p[1, y, x]
-            px = p[2, y, x]
+            py = p_1[y, x]
+            px = p_2[y, x]
             
-            y_idx = clamp(round(Int, py), 1, H)
-            x_idx = clamp(round(Int, px), 1, W)
+            # Coordinate intere (floor)
+            py_int = floor(Int, py)
+            px_int = floor(Int, px)
             
-            p[1, y, x] = py + dP[1, y_idx, x_idx]
-            p[2, y, x] = px + dP[2, y_idx, x_idx]
+            # Pesi frazionari per interpolazione
+            wy = py - py_int
+            wx = px - px_int
+            
+            # Clamp indici per accesso sicuro (1-based indexing)
+            # Usiamo H-1 e W-1 perché accediamo anche a y+1 e x+1
+            y0 = clamp(py_int, 1, H-1)
+            x0 = clamp(px_int, 1, W-1)
+            y1 = y0 + 1
+            x1 = x0 + 1
+            
+            # Interpolazione Bilineare per DY (Canale 1)
+            dy00 = dP_1[y0, x0]
+            dy10 = dP_1[y1, x0]
+            dy01 = dP_1[y0, x1]
+            dy11 = dP_1[y1, x1]
+            
+            dy_interp = (1-wy)*(1-wx)*dy00 + wy*(1-wx)*dy10 + (1-wy)*wx*dy01 + wy*wx*dy11
+            
+            # Interpolazione Bilineare per DX (Canale 2)
+            dx00 = dP_2[y0, x0]
+            dx10 = dP_2[y1, x0]
+            dx01 = dP_2[y0, x1]
+            dx11 = dP_2[y1, x1]
+            
+            dx_interp = (1-wy)*(1-wx)*dx00 + wy*(1-wx)*dx10 + (1-wy)*wx*dx01 + wy*wx*dx11
+            
+            # Aggiorna posizioni
+            p_1[y, x] = py + dy_interp
+            p_2[y, x] = px + dx_interp
         end
     end
     
@@ -49,12 +84,11 @@ function masks_to_flows(masks::AbstractMatrix{<:Integer})
         return mu
     end
     
-    # Ottimizzazione: Usare array invece di Dict per i centri
+    # Preallocazione efficiente
     centers_y = zeros(Int, n_masks)
     centers_x = zeros(Int, n_masks)
     counts = zeros(Int, n_masks)
     
-    # Preallocazione per evitare riallocazioni dinamiche
     valid_pixels = Tuple{Int, Int, Int}[]
     sizehint!(valid_pixels, H * W ÷ 4) 
     
@@ -68,7 +102,7 @@ function masks_to_flows(masks::AbstractMatrix{<:Integer})
         end
     end
     
-    # Calcolo dei centroidi
+    # Calcolo centroidi
     for m in 1:n_masks
         if counts[m] > 0
             centers_y[m] = round(Int, centers_y[m] / counts[m])
@@ -76,11 +110,12 @@ function masks_to_flows(masks::AbstractMatrix{<:Integer})
         end
     end
     
-    n_iter = 50 
+    # 🔴 AUMENTATO A 200: Essenziale per celle grandi e QC corretto
+    n_iter = 200 
     T_new = zeros(Float32, H, W)
     
     for iter in 1:n_iter
-        # Aggiungi "calore" ai centri
+        # Aggiungi calore ai centri
         for m in 1:n_masks
             cy, cx = centers_y[m], centers_x[m]
             if cy > 0 && cx > 0
@@ -88,15 +123,12 @@ function masks_to_flows(masks::AbstractMatrix{<:Integer})
             end
         end
         
-        # Diffusione
+        # Diffusione ottimizzata (unrolled loop)
         for (y, x, m) in valid_pixels
-            # Somma valori vicini (unrolling manuale per velocità)
-            # Siccome valid_pixels è generato da 2:H-1, siamo sicuri che y-1 e y+1 esistano
             s = T[y-1, x-1] + T[y-1, x] + T[y-1, x+1] +
                 T[y,   x-1]                + T[y,   x+1] +
                 T[y+1, x-1] + T[y+1, x] + T[y+1, x+1]
             
-            # Conta vicini con stessa maschera
             c = 0
             if masks[y-1, x-1] == m; c += 1; end
             if masks[y-1, x]   == m; c += 1; end
@@ -210,9 +242,15 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
     H, W = size(cellprob)
     iscell = cellprob .> cellprob_threshold
     
-    # Python: dP * (cellprob > cellprob_threshold) / 5.
     dP_dyn = copy(dP) ./ 5.0f0
-    dP_dyn[:, .!iscell] .= 0.0f0  # Azzera flussi nello sfondo
+    
+    # Mascheratura sicura dello sfondo (evita errori di indicizzazione)
+    for y in 1:H, x in 1:W
+        if !iscell[y, x]
+            dP_dyn[1, y, x] = 0.0f0
+            dP_dyn[2, y, x] = 0.0f0
+        end
+    end
     
     println("   --> Following flows...")
     p = follow_flows(dP_dyn, niter=niter)
