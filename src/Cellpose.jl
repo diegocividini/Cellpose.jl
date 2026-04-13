@@ -132,6 +132,10 @@ function remove_bad_flow_masks!(masks::AbstractMatrix{<:Integer}, dP::AbstractAr
     mu = masks_to_flows(masks)
     
     n_masks = maximum(masks)
+    if n_masks == 0
+        return masks
+    end
+    
     errors = zeros(Float32, n_masks)
     counts = zeros(Int, n_masks)
     
@@ -140,9 +144,10 @@ function remove_bad_flow_masks!(masks::AbstractMatrix{<:Integer}, dP::AbstractAr
     for y in 1:H, x in 1:W
         m = masks[y, x]
         if m > 0
-            # FIX: dP è già stato diviso per 5.0, ora ha magnitudine 1 come "mu"
-            dy_net = dP[1, y, x]
-            dx_net = dP[2, y, x]
+            # I flussi del modello hanno scala ~5.0.
+            # Divisi per 5.0 per confrontarli correttamente con mu (scala ~1.0).
+            dy_net = dP[1, y, x] / 5.0f0
+            dx_net = dP[2, y, x] / 5.0f0
             
             dy_mask = mu[1, y, x]
             dx_mask = mu[2, y, x]
