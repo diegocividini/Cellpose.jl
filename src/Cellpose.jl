@@ -199,7 +199,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
     
     seeds = Vector{Tuple{Int, Int, Int32}}()
     current_id = Int32(1)
-    min_hist = 8
+    min_hist = 15
     
     @inbounds for x in 1:W, y in 1:H
         if hist[y, x] >= min_hist
@@ -259,7 +259,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         remove_bad_flow_masks!(masks, dP_dyn; threshold=flow_threshold)
     end
     println("   --> Removing small masks...")
-    remove_small_masks!(masks; min_size=15)
+    remove_small_masks!(masks; min_size=30)
     
     uniq = sort!(collect(Set(masks[masks .> 0])))
     if !isempty(uniq)
@@ -401,7 +401,7 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     println("📊 % cell pixels (>0.0): ", sum(cellprob_crop .> 0.0f0) / length(cellprob_crop) * 100)
 
     # Test with theshold = 0.0f0 to check if we can get more seeds (even if some are false positives)
-    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=-0.5, flow_threshold=0.0)
+    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=0.0, flow_threshold=0.4)
     
     println("dP range: ", extrema(dP_crop))
     println("cellprob range: ", extrema(cellprob_crop))
