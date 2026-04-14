@@ -180,87 +180,81 @@ end
 
 function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T}; 
                         niter::Int=200, cellprob_threshold::Float64=-0.5, 
-                        flow_threshold::Float64=1.0) where T  # ✅ AUMENTATO A 1.0
+                        flow_threshold::Float64=0.0, min_size::Int=15) where T
     H, W = size(cellprob)
     iscell = cellprob .> cellprob_threshold
-    
     dP_dyn = copy(dP) ./ 5.0f0
+
     println("   --> Following flows...")
     p = follow_flows(dP_dyn, niter=niter)
-    
-    hist = zeros(Int32, H, W)
+
+    # 1. Mappa di destinazione (istogramma dei flussi)
+    seg = zeros(Int32, H, W)
     @inbounds for x in 1:W, y in 1:H
         if iscell[y, x]
             py = clamp(round(Int, p[1, y, x]), 1, H)
             px = clamp(round(Int, p[2, y, x]), 1, W)
-            hist[py, px] += 1
+            seg[py, px] += 1
         end
     end
+
+    # 2. Identificazione seed (massimi locali + soglia)
+    seeds = zeros(Bool, H, W)
+    min_hist = 10  # ✅ Allineato al default Python (seg > 10)
     
-    seeds = Vector{Tuple{Int, Int, Int32}}()
-    current_id = Int32(1)
-    min_hist = 15
-    
-    @inbounds for x in 1:W, y in 1:H
-        if hist[y, x] >= min_hist
+    @inbounds for x in 2:W-1, y in 2:H-1
+        if seg[y, x] >= min_hist
             is_max = true
             for dy in -1:1, dx in -1:1
-                (dx == 0 && dy == 0) && continue
-                ny, nx = y + dy, x + dx
-                if 1 <= ny <= H && 1 <= nx <= W && hist[ny, nx] > hist[y, x]
+                if seg[y+dy, x+dx] > seg[y, x]
                     is_max = false; break
                 end
             end
-            if is_max
-                push!(seeds, (y, x, current_id))
-                current_id += 1
-            end
+            seeds[y, x] = is_max
         end
     end
-    println("   --> Found $(length(seeds)) seed points")
-    
-    grid = zeros(Int32, H, W)
-    # PROPAGAZIONE BFS A CODA (O(N), convergenza garantita, zero Dict)
-    queue = Vector{Tuple{Int, Int}}(undef, sum(iscell))
+
+    # 3. Etichettatura componenti connesse dei seed (BFS ottimizzato)
+    labels = zeros(Int32, H, W)
+    current_id = 0
+    queue = Vector{Tuple{Int, Int}}(undef, H*W)
     head = 1; tail = 0
-    
-    for (sy, sx, id) in seeds
-        grid[sy, sx] = id
-        tail += 1
-        queue[tail] = (sy, sx)
-    end
-    
-    @inbounds while head <= tail
-        y, x = queue[head]
-        head += 1
-        lbl = grid[y, x]
-        
-        for dy in -1:1, dx in -1:1
-            ny, nx = y + dy, x + dx
-            if 1 <= ny <= H && 1 <= nx <= W && iscell[ny, nx] && grid[ny, nx] == 0
-                grid[ny, nx] = lbl
-                tail += 1
-                queue[tail] = (ny, nx)
+
+    @inbounds for x in 1:W, y in 1:H
+        if seeds[y, x] && labels[y, x] == 0
+            current_id += 1
+            labels[y, x] = current_id
+            tail += 1; queue[tail] = (y, x)
+            
+            while head <= tail
+                cy, cx = queue[head]; head += 1
+                for dy in -1:1, dx in -1:1
+                    ny, nx = cy + dy, cx + dx
+                    if 1 <= ny <= H && 1 <= nx <= W && seeds[ny, nx] && labels[ny, nx] == 0
+                        labels[ny, nx] = current_id
+                        tail += 1; queue[tail] = (ny, nx)
+                    end
+                end
             end
         end
     end
-    
+    println("   --> Found $(current_id) seed points")
+
+    # 4. Assegnazione diretta: ogni pixel prende l'ID del punto di arrivo
     masks = zeros(Int32, H, W)
     @inbounds for x in 1:W, y in 1:H
         if iscell[y, x]
             py = clamp(round(Int, p[1, y, x]), 1, H)
             px = clamp(round(Int, p[2, y, x]), 1, W)
-            masks[y, x] = grid[py, px]
+            masks[y, x] = labels[py, px]
         end
     end
-    
-    if flow_threshold > 0.0
-        println("   --> Removing bad flow masks...")
-        remove_bad_flow_masks!(masks, dP_dyn; threshold=flow_threshold)
-    end
+
+    # 5. Cleanup dimensioni
     println("   --> Removing small masks...")
-    remove_small_masks!(masks; min_size=30)
-    
+    remove_small_masks!(masks; min_size=min_size)
+
+    # 6. Renumera ID consecutivi
     uniq = sort!(collect(Set(masks[masks .> 0])))
     if !isempty(uniq)
         id_map = Dict(uniq[i] => Int32(i) for i in 1:length(uniq))
@@ -268,6 +262,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
             m = masks[i]; m > 0 && (masks[i] = id_map[m])
         end
     end
+    println("   --> Final count: $(maximum(masks))")
     return masks
 end
 
@@ -401,7 +396,7 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     println("📊 % cell pixels (>0.0): ", sum(cellprob_crop .> 0.0f0) / length(cellprob_crop) * 100)
 
     # Test with theshold = 0.0f0 to check if we can get more seeds (even if some are false positives)
-    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=0.0, flow_threshold=0.4)
+    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=-0.5, flow_threshold=0.0, min_size=15)
     
     println("dP range: ", extrema(dP_crop))
     println("cellprob range: ", extrema(cellprob_crop))
