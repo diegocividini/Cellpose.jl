@@ -200,13 +200,21 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
 
     # 2. Identificazione seed (massimi locali + soglia)
     seeds = zeros(Bool, H, W)
-    min_hist = 10  # ✅ Allineato al default Python (seg > 10)
+    min_hist = 15  # ✅ Allineato al default Python (seg > 10)
+    
+    # Filtro massimo 3x3 manuale per sopprimere rumore locale prima del thresholding
+    seg_local_max = similar(seg)
+    @inbounds for y in 2:H-1, x in 2:W-1
+        seg_local_max[y,x] = max(seg[y-1,x-1], seg[y-1,x], seg[y-1,x+1],
+                                    seg[y,x-1],   seg[y,x],   seg[y,x+1],
+                                    seg[y+1,x-1], seg[y+1,x], seg[y+1,x+1])
+    end
     
     @inbounds for x in 2:W-1, y in 2:H-1
-        if seg[y, x] >= min_hist
+        if seg_local_max[y, x] >= min_hist
             is_max = true
             for dy in -1:1, dx in -1:1
-                if seg[y+dy, x+dx] > seg[y, x]
+                if seg[y+dy, x+dx] > seg[y, x]  # ✅ Confronta su seg originale, non smoothato
                     is_max = false; break
                 end
             end
@@ -396,7 +404,7 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     println("📊 % cell pixels (>0.0): ", sum(cellprob_crop .> 0.0f0) / length(cellprob_crop) * 100)
 
     # Test with theshold = 0.0f0 to check if we can get more seeds (even if some are false positives)
-    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=-0.5, flow_threshold=0.0, min_size=15)
+    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=-0.5, flow_threshold=0.0, min_size=25)
     
     println("dP range: ", extrema(dP_crop))
     println("cellprob range: ", extrema(cellprob_crop))
