@@ -180,41 +180,56 @@ end
 
 function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T}; 
                         niter::Int=200, cellprob_threshold::Float64=-0.5, 
-                        flow_threshold::Float64=0.0, min_size::Int=15) where T
+                        flow_threshold::Float64=0.4, min_size::Int=15) where T
     H, W = size(cellprob)
     iscell = cellprob .> cellprob_threshold
+    # Normalizziamo dP per avere valori circa tra -1 e 1 per il cleanup
     dP_dyn = copy(dP) ./ 5.0f0
 
     println("   --> Following flows...")
     p = follow_flows(dP_dyn, niter=niter)
 
     # 1. Mappa di destinazione (istogramma dei flussi)
-    seg = zeros(Int32, H, W)
+    seg = zeros(Float32, H, W) # Usiamo Float32 per permettere lo smoothing
     @inbounds for x in 1:W, y in 1:H
         if iscell[y, x]
             py = clamp(round(Int, p[1, y, x]), 1, H)
             px = clamp(round(Int, p[2, y, x]), 1, W)
-            seg[py, px] += 1
+            seg[py, px] += 1.0f0
         end
     end
 
-    # 2. Identificazione seed (massimi locali + soglia)
-    seeds = zeros(Bool, H, W)
-    min_hist = 15  # ✅ Allineato al default Python (seg > 10)
-    
-    # Filtro massimo 3x3 manuale per sopprimere rumore locale prima del thresholding
-    seg_local_max = similar(seg)
+    # ️ FIX 1: Smoothing della mappa 'seg' per unire i flussi convergenti vicini
+    # Questo previene che una singola cellula venga vista come più picchi distinti.
+    seg_smooth = similar(seg)
     @inbounds for y in 2:H-1, x in 2:W-1
-        seg_local_max[y,x] = max(seg[y-1,x-1], seg[y-1,x], seg[y-1,x+1],
-                                    seg[y,x-1],   seg[y,x],   seg[y,x+1],
-                                    seg[y+1,x-1], seg[y+1,x], seg[y+1,x+1])
+        seg_smooth[y,x] = (seg[y-1,x-1] + seg[y-1,x] + seg[y-1,x+1] +
+                           seg[y,x-1]   + seg[y,x]   + seg[y,x+1] +
+                           seg[y+1,x-1] + seg[y+1,x] + seg[y+1,x+1]) / 9.0f0
+    end
+    # Gestione bordi (copia semplice per evitare buchi ai bordi)
+    seg_smooth[1,:] .= seg[1,:]; seg_smooth[H,:] .= seg[H,:]
+    seg_smooth[:,1] .= seg[:,1]; seg_smooth[:,W] .= seg[:,W]
+
+    # 2. Identificazione seed sulla mappa lisciata
+    seeds = zeros(Bool, H, W)
+    min_hist = 10.0f0  # Soglia leggermente più bassa perché i valori sono mediati
+    
+    # Filtro massimo 3x3 sulla mappa lisciata
+    seg_local_max = similar(seg_smooth)
+    @inbounds for y in 2:H-1, x in 2:W-1
+        seg_local_max[y,x] = max(seg_smooth[y-1,x-1], seg_smooth[y-1,x], seg_smooth[y-1,x+1],
+                                 seg_smooth[y,x-1],   seg_smooth[y,x],   seg_smooth[y,x+1],
+                                 seg_smooth[y+1,x-1], seg_smooth[y+1,x], seg_smooth[y+1,x+1])
     end
     
     @inbounds for x in 2:W-1, y in 2:H-1
+        # Controlliamo il massimo locale sulla mappa smoothata
         if seg_local_max[y, x] >= min_hist
             is_max = true
+            # Verifichiamo che sia un massimo locale stretto
             for dy in -1:1, dx in -1:1
-                if seg[y+dy, x+dx] > seg[y, x]  # ✅ Confronta su seg originale, non smoothato
+                if seg_smooth[y+dy, x+dx] > seg_smooth[y, x] + 0.1f0 # Tolleranza piccola
                     is_max = false; break
                 end
             end
@@ -222,7 +237,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         end
     end
 
-    # 3. Etichettatura componenti connesse dei seed (BFS ottimizzato)
+    # 3. Etichettatura componenti connesse dei seed (BFS)
     labels = zeros(Int32, H, W)
     current_id = 0
     queue = Vector{Tuple{Int, Int}}(undef, H*W)
@@ -256,6 +271,13 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
             px = clamp(round(Int, p[2, y, x]), 1, W)
             masks[y, x] = labels[py, px]
         end
+    end
+
+    # 🛠️ FIX 2: Cleanup delle maschere "brutte" (Flusso non coerente)
+    # Questo rimuove i falsi positivi (i puntini rossi nella mappa)
+    if flow_threshold > 0.0
+        println("   --> Applying flow threshold cleanup ($flow_threshold)...")
+        remove_bad_flow_masks!(masks, dP_dyn; threshold=flow_threshold)
     end
 
     # 5. Cleanup dimensioni
@@ -404,7 +426,7 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     println("📊 % cell pixels (>0.0): ", sum(cellprob_crop .> 0.0f0) / length(cellprob_crop) * 100)
 
     # Test with theshold = 0.0f0 to check if we can get more seeds (even if some are false positives)
-    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=-0.5, flow_threshold=0.0, min_size=25)
+    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=-0.5, flow_threshold=0.4, min_size=25)
     
     println("dP range: ", extrema(dP_crop))
     println("cellprob range: ", extrema(cellprob_crop))
