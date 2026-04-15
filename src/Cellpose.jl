@@ -15,41 +15,41 @@ export normalize99, prepare_tensor, segment, compute_masks, save_masks
 
 function follow_flows(dP::AbstractArray{T, 3}; niter::Int=200) where T
     _, H, W = size(dP)
-    p = zeros(Float32, 2, H, W)
+    # ✅ FIX: Usa Float64 per la posizione p per evitare deriva numerica cumulativa
+    p = zeros(Float64, 2, H, W) 
     
     @inbounds for x in 1:W, y in 1:H
-        p[1, y, x] = Float32(y)
-        p[2, y, x] = Float32(x)
+        p[1, y, x] = Float64(y)
+        p[2, y, x] = Float64(x)
     end
     
-    dP_1 = @view dP[1, :, :]
-    dP_2 = @view dP[2, :, :]
-    p_1 = @view p[1, :, :]
-    p_2 = @view p[2, :, :]
+    # Convertiamo dP in Float64 per coerenza nei calcoli
+    dP_1 = Float64.(dP[1, :, :])
+    dP_2 = Float64.(dP[2, :, :])
+    
     Hm1, Wm1 = H - 1, W - 1
 
-    # ✅ Interpolazione Bilineare (essenziale per convergenza precisa)
+    # ✅ FIX: Loop di integrazione in Float64
     for _ in 1:niter
         @inbounds for x in 1:W, y in 1:H
-            py = p_1[y, x]
-            px = p_2[y, x]
+            py = p[1, y, x]
+            px = p[2, y, x]
             
-            # Floor + pesi frazionari
             y0 = clamp(floor(Int, py), 1, Hm1)
             x0 = clamp(floor(Int, px), 1, Wm1)
-            wy = clamp(py - y0, 0.0f0, 1.0f0)
-            wx = clamp(px - x0, 0.0f0, 1.0f0)
+            wy = clamp(py - y0, 0.0, 1.0)
+            wx = clamp(px - x0, 0.0, 1.0)
             y1, x1 = y0 + 1, x0 + 1
             
-            # Bilineare DY
-            dy = (1.0f0-wy)*(1.0f0-wx)*dP_1[y0, x0] + wy*(1.0f0-wx)*dP_1[y1, x0] + 
-                 (1.0f0-wy)*wx*dP_1[y0, x1] + wy*wx*dP_1[y1, x1]
-            # Bilineare DX
-            dx = (1.0f0-wy)*(1.0f0-wx)*dP_2[y0, x0] + wy*(1.0f0-wx)*dP_2[y1, x0] + 
-                 (1.0f0-wy)*wx*dP_2[y0, x1] + wy*wx*dP_2[y1, x1]
+            # Bilineare DY (Float64)
+            dy = (1.0-wy)*(1.0-wx)*dP_1[y0, x0] + wy*(1.0-wx)*dP_1[y1, x0] + 
+                    (1.0-wy)*wx*dP_1[y0, x1] + wy*wx*dP_1[y1, x1]
+            # Bilineare DX (Float64)
+            dx = (1.0-wy)*(1.0-wx)*dP_2[y0, x0] + wy*(1.0-wx)*dP_2[y1, x0] + 
+                    (1.0-wy)*wx*dP_2[y0, x1] + wy*wx*dP_2[y1, x1]
             
-            p_1[y, x] = py + dy
-            p_2[y, x] = px + dx
+            p[1, y, x] = py + dy
+            p[2, y, x] = px + dx
         end
     end
     return p
@@ -225,26 +225,33 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
     seg_smooth[1,:] .= seg[1,:]; seg_smooth[H,:] .= seg[H,:]
     seg_smooth[:,1] .= seg[:,1]; seg_smooth[:,W] .= seg[:,W]
 
-    min_hist = 5.0f0 
-    
     seeds = zeros(Bool, H, W)
-    seg_local_max = similar(seg_smooth)
+    min_hist = 5.0f0 # Mantieni la tua soglia che funzionava bene
     
-    @inbounds for y in 2:H-1, x in 2:W-1
-        seg_local_max[y,x] = max(seg_smooth[y-1,x-1], seg_smooth[y-1,x], seg_smooth[y-1,x+1],
-                                    seg_smooth[y,x-1],   seg_smooth[y,x],   seg_smooth[y,x+1],
-                                    seg_smooth[y+1,x-1], seg_smooth[y+1,x], seg_smooth[y+1,x+1])
-    end
-    
+    # 🛠️ FIX: Rilevazione Massimi Locali "Plateau-Aware"
+    # Un punto è seed se è >= min_hist ED È IL MASSIMO LOCALE UNICO (o vince il tie-break)
     @inbounds for x in 2:W-1, y in 2:H-1
-        if seg_local_max[y, x] >= min_hist
-            is_max = true
+        val = seg_smooth[y, x]
+        if val >= min_hist
+            is_seed = true
+            # Controlla tutti i vicini 3x3
             for dy in -1:1, dx in -1:1
-                if seg_smooth[y+dy, x+dx] > seg_smooth[y, x] + 0.01f0
-                    is_max = false; break
+                if dy == 0 && dx == 0 continue end
+                ny, nx = y + dy, x + dx
+                nval = seg_smooth[ny, nx]
+                
+                if nval > val
+                    is_seed = false; break
+                elseif nval == val
+                    # Gestione Plateau: vince il pixel con coordinate maggiori
+                    # Se esiste un vicino con valore uguale e coordinate maggiori, 
+                    # allora quel vicino sarà il seed, e questo NO.
+                    if (ny > y) || (ny == y && nx > x)
+                        is_seed = false; break
+                    end
                 end
             end
-            seeds[y, x] = is_max
+            seeds[y, x] = is_seed
         end
     end
 
@@ -290,8 +297,8 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
 
     # 🛠️ AGGRESSIVO: Rimuovi maschere > 1200px (sono quasi sicuramente fusioni)
     # Questo è il taglio netto per abbattere il conteggio da 3300 a 2500
-    println("   --> Removing giant masks (>1800px)...")
-    remove_giant_masks!(masks; max_size=1800) 
+    println("   --> Removing giant masks (>2000px)...")
+    remove_giant_masks!(masks; max_size=2000) 
 
     # 2. Renumera ID
     uniq = sort!(collect(Set(masks[masks .> 0])))
@@ -438,7 +445,7 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     # cellprob_threshold=-1.5 -> Massima copertura (recupera verde)
     # flow_threshold=0.0 -> Non cancellare per forma (evita buchi)
     # min_size=5 -> Accetta frammenti piccoli
-    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=-0.3, flow_threshold=0.0, min_size=25)
+    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=-0.3, flow_threshold=0.0, min_size=20)
     
     println("dP range: ", extrema(dP_crop))
     println("cellprob range: ", extrema(cellprob_crop))
