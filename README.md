@@ -16,71 +16,172 @@ This package provides a **pure Julia** pipeline for cellular segmentation using 
   * Flat-top window for seamless bilinear blending and stitching.
   * RGB channel formatting and 1-99th percentile normalization.
 * **Custom Dynamics Engine:** The core Euler integration for fluid dynamics (`follow_flows`) and spatial gradient mask recovery (`compute_masks`) have been rewritten and optimized for Julia arrays.
-* **Hardware Acceleration Ready:** Supports GPU inference on NVIDIA hardware via `ONNXRunTime.jl` with a simple flag toggle.
+* **Hardware Acceleration Ready:** Supports GPU inference on NVIDIA hardware via `ONNXRuntime.jl` with a simple flag toggle.
+
+---
+
+## ⚙️ System Requirements
+
+| Component | Requirement |
+|-----------|-------------|
+| **Julia** | ≥ 1.9 (recommended: 1.10+) |
+| **OS** | Linux, macOS, Windows (WSL2 recommended for Windows) |
+| **RAM** | ≥ 8 GB (16+ GB recommended for images > 2048px) |
+| **GPU** *(optional)* | NVIDIA GPU with CUDA ≥ 11.8 + cuDNN ≥ 8.9 |
+| **Disk** | ~200 MB for ONNX model + temporary tile cache |
+
+---
 
 ## ⚒️ Installation
 
-### 1. Export ONNX model
+### 1. Clone the Repository
 
-Due to file size constraints, no pre-trained ONNX models are included in this repository. You must export the cpsam model yourself from the official Cellpose Python package.
-
-Ensure you have the original cellpose and torch packages installed in your Python environment.
-
-Run the provided export script to download the model and convert it to ONNX format:
-
-```Bash
-python scripts/py_to_onnx.py
+```bash
+git clone https://github.com/diegocividini/Cellpose.jl.git
+cd Cellpose.jl
 ```
 
-Move the generated cpsam.onnx (and its .data file, if present) into the `models/` directory of this project.
-
-### 2. Configure the environment
-
-Currently, the package is in development. You can run it locally by cloning the repository and instantiating the Julia environment:
+### 2. Instantiate the Julia Environment
 
 ```julia
-# Open the Julia REPL and type ']' to enter the Pkg manager
+# Open Julia REPL and enter package mode with ']'
+julia> ]
 pkg> activate .
 pkg> instantiate
 ```
 
-## ✨ Quick Start
+This will install all required dependencies:
+* **ONNXRuntime.jl** – ONNX model inference engine
+* **Images.jl, FileIO.jl** – Image I/O and processing
+* **Statistics.jl**, **FixedPointNumbers.jl** – Numerical utilities
+
+
+### 3. Export or Download the ONNX Model
+
+The package does not include pretrained models due to size constraints. You have two options:
+#### Option A: Export from Python (Recommended)
+If you have the official Cellpose Python package installed:
+
+```bash
+# Run the provided export script
+python scripts/py_to_onnx.py --model cpsam --output models/
+```
+
+This generates `models/cpsam.onnx` (and optionally `cpsam.onnx.data`).
+
+#### Option B: Use a Pre-exported Model
+
+If you already have a compatible ONNX model:
+
+1. Place it in the `models/` directory
+2. Ensure the model outputs a tensor named `"flows_and_probs"` with shape `(1, 3, H, W)` where:
+    * Channel 1: vertical flow (`dy`)
+    * Channel 2: horizontal flow (`dx`)
+    * Channel 3: cell probability map
+
+### 4. (Optional) Configure GPU Support
+
+If using NVIDIA GPU acceleration:
+1. Install `CUDA Toolkit ≥ 11.8`
+2. Install `cuDNN ≥ 8.9` and add to LD_LIBRARY_PATH (Linux) or system PATH (Windows)
+3. In Julia, verify CUDA is detected:
+
+    ```julia
+    using CUDA
+    CUDA.functional()  # should return true
+    ```
+
+---
+
+### ✨ Quick Start
+
+#### Basic Usage (Image Array)
 
 ```julia
 using Cellpose
-using NPZ
+using FileIO, Images
 
-# 1. Load your 2D or 3D (RGB) biomedical image
-img = npzread("data/my_image.npy")
+# Load image (supports TIFF, PNG, JPEG, NPZ, etc.)
+img = load("data/my_image.tif")  # Returns Array{<:Colorant} or Matrix{<:Real}
 
-# 2. Define the path to your exported ONNX model
+# Convert to Float32 array if needed (Cellpose handles this internally)
+# But you can pre-convert for control:
+img_data = Float32.(channelview(img)[1:3, :, :])  # For RGB; drop [1:3, :, :] for grayscale
+
+# Run segmentation
 model_path = "models/cpsam.onnx"
+masks = segment(img_data, model_path; use_gpu=false, diameter=0.0)  # diameter=0.0 → auto-estimate
 
-# 3. Run the full segmentation pipeline
-# Note: Set use_gpu=true if you are running on an NVIDIA GPU machine
-masks = segment(img, model_path, use_gpu=false)
-
-println("Segmentation complete. Found $(maximum(masks)) cells!")
+println("Segmentation complete. Found $(maximum(masks)) cells.")
 ```
 
-## 🧠 How it Works (The Pipeline)
+#### Basic Usage (File Path – Simplest)
 
-1. **Global Normalization:** The image is normalized per-channel (1st to 99th percentile) to prevent noise hallucinations in empty areas.
+```julia
+using Cellpose
 
-2. **Overlapping Tiling:** The image is divided into `256x256` patches with a 10% overlap (stride of 230 pixels).
+# Let Cellpose handle loading and conversion internally
+masks = segment("data/my_image.tif", "models/cpsam.onnx"; use_gpu=true, diameter=30.0)
 
-3. **Parallel Inference:** Each patch is formatted to 3 channels and passed through the ONNX network to predict cell probabilities and spatial gradients (`dP`).
+println("Found $(maximum(masks)) cells.")
+```
 
-4. **Flat-Top Blending:** Output patches are stitched back together using a flat-top window to smoothly blend the overlapping borders without edge amplification.
+#### Save Results
 
-5. **Fluid Dynamics:** Pixels are treated as particles and pushed along the predicted vector field using Euler integration until they converge at the cell centers.
+```julia
+# Save both analytical (16-bit TIFF) and visual (PNG overlay) outputs
+path_tiff, path_png = save_masks("data/my_image.tif", masks, "results/output")
 
-6. **Quality Control:** Small masks (area < 15 pixels) or masks with inconsistent flow fields are automatically rejected.
+# Outputs:
+#   results/output.tif          → Raw mask IDs (UInt16, 0=background)
+#   results/output_overlay.png  → Original image + colored cell boundaries
+```
 
-## 📜 Acknowledgments & Citation
+#### 🧠 Pipeline Overview
+
+1. **Global Normalization**: Per-channel scaling to [0,1] using 1st–99th percentiles (robust to outliers).
+2. **Overlapping Tiling**: Image split into 256×256 tiles with 10% overlap (stride = 230 px).
+3. **Parallel Inference**: Each tile processed independently via ONNX runtime (CPU or CUDA).
+4. **Flat-Top Blending**: Tiles stitched using a custom window function to avoid edge artifacts.
+5. **Flow Integration**: Pixels "flow" along predicted vector field via Euler integration (`follow_flows`).
+6. **Seed Detection**: Local maxima in converged positions identify cell centers.
+7. **Mask Assignment**: Pixels assigned to nearest seed via BFS-like expansion.
+8. **Quality Control**: Masks filtered by size (`min_size`, `max_size`) and flow consistency.
+
+---
+
+### 📚 API Reference
+
+#### Core Functions
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `segment` | `segment(img::AbstractArray, model_path::String; use_gpu=false, diameter=0.0)` | Main entry point. Returns `Matrix{Int32}` mask array |
+| `segment` | `segment(img_path::String, model_path::String; use_gpu=false, diameter=0.0)` | Convenience overload: loads image internally |
+| `save_masks` | `save_masks(img_path, masks, output_path)` | Saves analytical (TIFF) and visual (PNG) outputs |
+| `normalize99` | `normalize99(img::AbstractArray)` | Percentile-based normalization [0,1] |
+| `estimate_diameter` | `estimate_diameter(cellprob::Matrix; threshold=0.0)` | Auto-estimates cell diameter from probability map |
+| `compute_masks` | `compute_masks(dP, cellprob; niter=200, min_size=100, max_size=1800)` | Low-level mask computation from flows + probabilities |
+
+#### Key Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------| ----------- |
+| `use_gpu` | `Bool` | `false` | Enable CUDA acceleration (requires NVIDIA GPU + CUDA toolkit) |
+| `diameter` | `Float64` | `0.0` | Expected cell diameter in pixels. `0.0` triggers auto-estimation |
+| `min_size` | `Int` | dynamic | Minimum mask area (px²). Auto-scaled from `diameter` if not set |
+| `max_size` | `Int` | dynamic | Maximum mask area (px²). Auto-scaled from `diameter` |
+| `cellprob_threshold` | `Float64` | `0.0` | Pixels with probability < threshold are treated as background |
+| `flow_threshold` | `Float64` | `0.0` | Masks with mean flow error > threshold are discarded |
+| `niter` | `Int` | 200 | Number of Euler integration steps for flow following |
+
+---
+
+### 📜 Acknowledgments & Citation
 
 This is an independent port built for educational and research integration purposes. All credit for the original machine learning architecture, pretrained models, and algorithmic concepts goes to the original Cellpose authors.
 
 If you use the Cellpose algorithm in your research, please cite their original papers:
+> Stringer, C., Wang, T., Michaelos, M., & Pachitariu, M. (2021). Cellpose: a generalist algorithm for cellular anatomy. Nature Methods, 18(1), 100-106. https://doi.org/10.1038/s41592-020-01018-x
 
-> Stringer, C., Wang, T., Michaelos, M., & Pachitariu, M. (2021). Cellpose: a generalist algorithm for cellular anatomy. Nature Methods, 18(1), 100-106.
+> Pachitariu, M., & Stringer, C. (2022). Cellpose 2.0: how to train your own model. Nature Methods, 19(12), 1634-1641. https://doi.org/10.1038/s41592-022-01663-4
