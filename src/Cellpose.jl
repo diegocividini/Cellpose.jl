@@ -7,7 +7,7 @@ using Random
 using FixedPointNumbers
 using FileIO
 
-export normalize99, prepare_tensor, segment, compute_masks, save_masks
+export normalize99, prepare_tensor, segment, compute_masks, save_masks, estimate_diameter
 
 # ==============================================================================
 # 1. CORE DYNAMICS ALGORITHMS
@@ -15,21 +15,20 @@ export normalize99, prepare_tensor, segment, compute_masks, save_masks
 
 function follow_flows(dP::AbstractArray{T, 3}; niter::Int=200) where T
     _, H, W = size(dP)
-    # ✅ FIX: Usa Float64 per la posizione p per evitare deriva numerica cumulativa
-    p = zeros(Float64, 2, H, W) 
+    # ✅ FIX: Float64 per stabilità numerica nell'integrazione
+    p = zeros(Float64, 2, H, W)
     
     @inbounds for x in 1:W, y in 1:H
         p[1, y, x] = Float64(y)
         p[2, y, x] = Float64(x)
     end
     
-    # Convertiamo dP in Float64 per coerenza nei calcoli
+    # Conversione interna a Float64 per coerenza
     dP_1 = Float64.(dP[1, :, :])
     dP_2 = Float64.(dP[2, :, :])
     
     Hm1, Wm1 = H - 1, W - 1
 
-    # ✅ FIX: Loop di integrazione in Float64
     for _ in 1:niter
         @inbounds for x in 1:W, y in 1:H
             py = p[1, y, x]
@@ -43,10 +42,10 @@ function follow_flows(dP::AbstractArray{T, 3}; niter::Int=200) where T
             
             # Bilineare DY (Float64)
             dy = (1.0-wy)*(1.0-wx)*dP_1[y0, x0] + wy*(1.0-wx)*dP_1[y1, x0] + 
-                    (1.0-wy)*wx*dP_1[y0, x1] + wy*wx*dP_1[y1, x1]
+                 (1.0-wy)*wx*dP_1[y0, x1] + wy*wx*dP_1[y1, x1]
             # Bilineare DX (Float64)
             dx = (1.0-wy)*(1.0-wx)*dP_2[y0, x0] + wy*(1.0-wx)*dP_2[y1, x0] + 
-                    (1.0-wy)*wx*dP_2[y0, x1] + wy*wx*dP_2[y1, x1]
+                 (1.0-wy)*wx*dP_2[y0, x1] + wy*wx*dP_2[y1, x1]
             
             p[1, y, x] = py + dy
             p[2, y, x] = px + dx
@@ -62,7 +61,6 @@ function masks_to_flows(masks::AbstractMatrix{<:Integer})
     n_masks = maximum(masks)
     n_masks == 0 && return mu
     
-    # Centroidi e conteggi
     centers_y = zeros(Int, n_masks)
     centers_x = zeros(Int, n_masks)
     counts = zeros(Int, n_masks)
@@ -108,7 +106,6 @@ function masks_to_flows(masks::AbstractMatrix{<:Integer})
             masks[y+1, x]   == m && (c += 1)
             masks[y+1, x+1] == m && (c += 1)
             
-            # ✅ FIX: Evita DivideError quando c=0 (bordi maschera)
             T_new[y, x] = c > 0 ? s / c : T[y, x]
         end
         
@@ -138,7 +135,6 @@ function remove_bad_flow_masks!(masks::AbstractMatrix{<:Integer}, dP::AbstractAr
     @inbounds for x in 1:size(masks,2), y in 1:size(masks,1)
         m = masks[y, x]
         if m > 0
-            # dP è già scalato (~1.0), mu è normalizzato (~1.0)
             err = (mu[1, y, x] - dP[1, y, x])^2 + (mu[2, y, x] - dP[2, y, x])^2
             errors[m] += err
             counts[m] += 1
@@ -178,7 +174,6 @@ function remove_small_masks!(masks::AbstractMatrix{<:Integer}; min_size::Int=15)
     return masks
 end
 
-# 🛠️ NUOVA FUNZIONE: Rimuove solo le maschere eccessivamente grandi (fusioni)
 function remove_giant_masks!(masks::AbstractMatrix{<:Integer}; max_size::Int=2500)
     n_masks = maximum(masks)
     n_masks == 0 && return masks
@@ -188,15 +183,74 @@ function remove_giant_masks!(masks::AbstractMatrix{<:Integer}; max_size::Int=250
     
     @inbounds for i in eachindex(masks)
         m = masks[i]
-        # Se la maschera supera la dimensione massima plausibile, viene azzerata
         m > 0 && counts[m] > max_size && (masks[i] = 0)
     end
     return masks
 end
 
+# ==============================================================================
+# 2. AUTOMATIC DIAMETER ESTIMATION
+# ==============================================================================
+
+"""
+    estimate_diameter(cellprob::AbstractMatrix; threshold=0.0f0)
+
+Stima il diametro tipico delle cellule dalla mappa di probabilità.
+Usa la mediana delle aree delle componenti connesse > threshold.
+"""
+function estimate_diameter(cellprob::AbstractMatrix{T}; threshold::T=0.0f0) where T
+    H, W = size(cellprob)
+    binary = cellprob .> threshold
+
+    labels = zeros(Int32, H, W)
+    current_id = 0
+    queue = Vector{Tuple{Int, Int}}(undef, H * W)
+
+    @inbounds for x in 1:W, y in 1:H
+        if binary[y, x] && labels[y, x] == 0
+            current_id += 1
+            labels[y, x] = current_id
+            head = 1; tail = 1
+            queue[tail] = (y, x)
+            
+            while head <= tail
+                cy, cx = queue[head]; head += 1
+                for dy in -1:1, dx in -1:1
+                    dy == 0 && dx == 0 && continue
+                    ny, nx = cy + dy, cx + dx
+                    if 1 <= ny <= H && 1 <= nx <= W && binary[ny, nx] && labels[ny, nx] == 0
+                        labels[ny, nx] = current_id
+                        tail += 1; queue[tail] = (ny, nx)
+                    end
+                end
+            end
+        end
+    end
+
+    areas = zeros(Int, current_id)
+    @inbounds for v in labels; v > 0 && (areas[v] += 1); end
+
+    # Filtra rumore (<30px) e artefatti patologici (>15000px)
+    valid_areas = filter(a -> 30 <= a <= 15000, areas)
+    
+    if isempty(valid_areas)
+        println("⚠️  Diameter estimation failed (too few/valid cells). Using fallback: 30px")
+        return 30.0f0
+    end
+
+    median_area = median(valid_areas)
+    diameter = 2.0f0 * sqrt(median_area / Float32(π))
+    return diameter
+end
+
+# ==============================================================================
+# 3. MASK COMPUTATION
+# ==============================================================================
+
 function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T}; 
-                        niter::Int=200, cellprob_threshold::Float64=-0.3,
-                        flow_threshold::Float64=0.0, min_size::Int=25) where T
+                        niter::Int=200, cellprob_threshold::Float64=0.0,
+                        flow_threshold::Float64=0.0, min_size::Int=100, 
+                        max_size::Int=1800) where T
     H, W = size(cellprob)
     iscell = cellprob .> cellprob_threshold
     dP_dyn = copy(dP) ./ 5.0f0
@@ -213,7 +267,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         end
     end
 
-    # Smoothing 3x3
+    # Smoothing 3x3 (preserva picchi piccoli)
     seg_smooth = zeros(Float32, H, W)
     @inbounds for y in 2:H-1, x in 2:W-1
         seg_smooth[y,x] = (
@@ -226,23 +280,19 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
     seg_smooth[:,1] .= seg[:,1]; seg_smooth[:,W] .= seg[:,W]
 
     seeds = zeros(Bool, H, W)
-    min_hist = 5.0f0  # La tua soglia che funzionava
+    min_hist = 5.0f0
     
     seg_local_max = similar(seg_smooth)
-    
-    # Calcolo massimi locali 3x3
     @inbounds for y in 2:H-1, x in 2:W-1
         seg_local_max[y,x] = max(seg_smooth[y-1,x-1], seg_smooth[y-1,x], seg_smooth[y-1,x+1],
                                     seg_smooth[y,x-1],   seg_smooth[y,x],   seg_smooth[y,x+1],
                                     seg_smooth[y+1,x-1], seg_smooth[y+1,x], seg_smooth[y+1,x+1])
     end
     
-    # Assegnazione seed con tolleranza
     @inbounds for x in 2:W-1, y in 2:H-1
         if seg_local_max[y, x] >= min_hist
             is_max = true
             for dy in -1:1, dx in -1:1
-                # Tolleranza classica: scarta solo se c'è un vicino significativamente più alto
                 if seg_smooth[y+dy, x+dx] > seg_smooth[y, x] + 0.01f0
                     is_max = false; break
                 end
@@ -287,16 +337,14 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         end
     end
 
-    # 1. Rimuovi piccoli
-    println("   --> Removing small masks...")
+    # Cleanup
+    println("   --> Removing small masks (min=$(min_size)px)...")
     remove_small_masks!(masks; min_size=min_size)
 
-    # 🛠️ AGGRESSIVO: Rimuovi maschere > 1200px (sono quasi sicuramente fusioni)
-    # Questo è il taglio netto per abbattere il conteggio da 3300 a 2500
-    println("   --> Removing giant masks (>1800px)...")
-    remove_giant_masks!(masks; max_size=1800) 
+    println("   --> Removing giant masks (max=$(max_size)px)...")
+    remove_giant_masks!(masks; max_size=max_size)
 
-    # 2. Renumera ID
+    # Renumera ID consecutivi
     uniq = sort!(collect(Set(masks[masks .> 0])))
     if !isempty(uniq)
         id_map = Dict(uniq[i] => Int32(i) for i in 1:length(uniq))
@@ -309,7 +357,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
 end
 
 # ==============================================================================
-# 2. IMAGE PROCESSING & INFERENCE 
+# 4. IMAGE PROCESSING & INFERENCE 
 # ==============================================================================
 
 function normalize99(img::AbstractArray)
@@ -365,7 +413,9 @@ function pad_reflect(img::AbstractArray, pad_h::Int, pad_w::Int)
     end
 end
 
-function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
+function segment(img::AbstractArray, model_path::String; 
+                 use_gpu::Bool=false, 
+                 diameter::Float64=0.0)  # 0.0 = stima automatica
     println("1. Initializing ONNX model...")
     model = use_gpu ? load_inference(model_path, execution_provider=:cuda) : load_inference(model_path)
     use_gpu && println("   --> Hardware acceleration activated (CUDA provider).")
@@ -437,20 +487,32 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     println("📊 cellprob range: ", extrema(cellprob_crop))
     println("📊 % cell pixels (>0.0): ", sum(cellprob_crop .> 0.0f0) / length(cellprob_crop) * 100)
 
-    # 🛠️ PARAMETRI AGGIORNATI:
-    # cellprob_threshold=-1.5 -> Massima copertura (recupera verde)
-    # flow_threshold=0.0 -> Non cancellare per forma (evita buchi)
-    # min_size=5 -> Accetta frammenti piccoli
-    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=0.0, flow_threshold=0.0, min_size=100)
+    # 📏 STIMA AUTOMATICA O USO PARAMETRO UTENTE
+    if diameter <= 0.0
+        diameter = estimate_diameter(cellprob_crop)
+        println("📏 Estimated cell diameter: $(round(diameter, digits=1)) px")
+    else
+        println("📏 Using user-defined diameter: $(diameter) px")
+    end
+
+    # 🧮 Euristica Cellpose per min/max size
+    min_size = max(15, round(Int, (diameter^2) / 10.0))
+    max_size = round(Int, (diameter^2) * 2.5)
+    println("   --> Auto-computed min_size: $(min_size)px | max_size: $(max_size)px")
+
+    # Esecuzione segmentazione con parametri dinamici
+    masks = compute_masks(dP_crop, cellprob_crop; 
+                            niter=200, 
+                            cellprob_threshold=0.0, 
+                            flow_threshold=0.0, 
+                            min_size=min_size, 
+                            max_size=max_size)
     
-    println("dP range: ", extrema(dP_crop))
-    println("cellprob range: ", extrema(cellprob_crop))
-    println("Unique masks before cleanup: ", length(unique(masks[masks .> 0])))
     println("Segmentation completed! Found $(maximum(masks)) cells.")
     return masks
 end
 
-function segment(img_path::String, model_path::String; use_gpu::Bool=false)
+function segment(img_path::String, model_path::String; use_gpu::Bool=false, diameter::Float64=0.0)
     println("Loading image from: $img_path ...")
     raw_img = load(img_path)
     if eltype(raw_img) <: RGB
@@ -460,7 +522,7 @@ function segment(img_path::String, model_path::String; use_gpu::Bool=false)
     else
         img_data = Float32.(raw_img)
     end
-    return segment(img_data, model_path; use_gpu=use_gpu)
+    return segment(img_data, model_path; use_gpu=use_gpu, diameter=diameter)
 end
 
 function save_masks(img_path::String, masks::AbstractMatrix{<:Integer}, output_path::String)
