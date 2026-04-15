@@ -1,19 +1,20 @@
 using Images, Statistics, Printf, ColorTypes
 
 # ==============================================================================
-# CONFIGURAZIONE PERCORSI
+# PATHS
 # ==============================================================================
-# Modifica questi percorsi per puntare ai tuoi file reali
 PATH_PYTHON = "/Users/diegocividini/Desktop/vm/maschera_wrapper.tif"
 PATH_JULIA  = "/Users/diegocividini/Desktop/vm/maschera_native.tif"
 OUTPUT_DIFF = "/Users/diegocividini/Desktop/vm/differenze_map.png"
 
 # ==============================================================================
-# FUNZIONI DI SUPPORTO
+# SUPPORT FUNCTIONS
 # ==============================================================================
 
 """
-Carica una maschera da file TIFF gestendo correttamente i tipi di dati.
+    load_mask(path::String)
+
+    Uploads a mask image and converts it to an integer matrix. Handles various pixel types and color formats.
 """
 function load_mask(path::String)
     println("Caricamento: $path")
@@ -35,7 +36,10 @@ function load_mask(path::String)
 end
 
 """
-Crea una mappa delle differenze per visualizzazione.
+    masks_to_flows_gpu(masks::AbstractMatrix{<:Integer})
+
+    Calculates the theoretical (ideal) flows from 2D masks using GPU. 
+    This is a reference function for comparing results with the CPU version.
 """
 function create_diff_map(masks_py, masks_jl)
     H, W = size(masks_py)
@@ -46,55 +50,52 @@ function create_diff_map(masks_py, masks_jl)
         j = masks_jl[y, x]
         
         if p == 0 && j == 0
-            diff_img[y, x] = RGB{N0f8}(0.0, 0.0, 0.0) # Nero: Sfondo
+            diff_img[y, x] = RGB{N0f8}(0.0, 0.0, 0.0) # Black: Background
         elseif p == j
-            diff_img[y, x] = RGB{N0f8}(1.0, 1.0, 0.0) # Giallo: Accordo perfetto (ID stesso)
+            diff_img[y, x] = RGB{N0f8}(1.0, 1.0, 0.0) # Yellow: Perfect Agreement (Same ID)
         elseif p > 0 && j == 0
-            diff_img[y, x] = RGB{N0f8}(0.0, 1.0, 0.0) # Verde: Solo Python
+            diff_img[y, x] = RGB{N0f8}(0.0, 1.0, 0.0) # Green: Python Only
         elseif p == 0 && j > 0
-            diff_img[y, x] = RGB{N0f8}(1.0, 0.0, 0.0) # Rosso: Solo Julia
+            diff_img[y, x] = RGB{N0f8}(1.0, 0.0, 0.0) # Red: Julia Only
         else
-            diff_img[y, x] = RGB{N0f8}(0.0, 0.0, 1.0) # Blu: Disaccordo ID (entrambe > 0 ma ID diversi)
+            diff_img[y, x] = RGB{N0f8}(0.0, 0.0, 1.0) # Blue: ID Mismatch (both > 0 but different IDs)
         end
     end
     return diff_img
 end
 
 # ==============================================================================
-# ESECUZIONE TEST
+# TEST COMPARISON FUNCTION
 # ==============================================================================
 
 function main()
     println("==================================================")
-    println("🔬 CONFRONTO QUANTITATIVO: PYTHON vs JULIA NATIVE")
+    println("QUANTITATIVE TEST: PYTHON vs JULIA")
     println("==================================================")
 
     try
         masks_py = load_mask(PATH_PYTHON)
         masks_jl = load_mask(PATH_JULIA)
 
-        # 1. Statistiche di base
         n_cells_py = maximum(masks_py)
         n_cells_jl = maximum(masks_jl)
         diff_cells = abs(n_cells_py - n_cells_jl)
 
-        println("\n📊 CONTEGGIO CELLULE:")
-        println("  Python Wrapper : $n_cells_py")
+        println("\nCELLS COUNT:")
+        println("  Python         : $n_cells_py")
         println("  Julia Native   : $n_cells_jl")
         println("  Differenza     : $diff_cells ($(round(diff_cells/n_cells_py*100, digits=2))%)")
 
-        # 2. Analisi delle Aree Globali
         aree_py = [sum(masks_py .== i) for i in 1:n_cells_py]
         aree_jl = [sum(masks_jl .== i) for i in 1:n_cells_jl]
 
-        println("\n📏 DISTRIBUZIONE AREE (pixel):")
-        println("  Python - Media: $(round(mean(aree_py), digits=1)) ± $(round(std(aree_py), digits=1))")
-        println("           Mediana: $(median(aree_py)), Min: $(minimum(aree_py)), Max: $(maximum(aree_py))")
+        println("\n📏 AREA DISTRIBUTION (pixel):")
+        println("  Python - Average: $(round(mean(aree_py), digits=1)) ± $(round(std(aree_py), digits=1))")
+        println("           Median : $(median(aree_py)), Min: $(minimum(aree_py)), Max: $(maximum(aree_py))")
         
-        println("  Julia  - Media: $(round(mean(aree_jl), digits=1)) ± $(round(std(aree_jl), digits=1))")
-        println("           Mediana: $(median(aree_jl)), Min: $(minimum(aree_jl)), Max: $(maximum(aree_jl))")
+        println("  Julia  - Average: $(round(mean(aree_jl), digits=1)) ± $(round(std(aree_jl), digits=1))")
+        println("           Median : $(median(aree_jl)), Min: $(minimum(aree_jl)), Max: $(maximum(aree_jl))")
 
-        # 3. IoU Binario (Metrica fondamentale di qualità)
         is_cell_py = masks_py .> 0
         is_cell_jl = masks_jl .> 0
         
@@ -102,12 +103,11 @@ function main()
         union = sum(is_cell_py .| is_cell_jl)
         iou_binary = intersection / union
         
-        println("\n🎯 QUALITÀ SEGMENTAZIONE (Pixel Accuracy & IoU):")
+        println("\n🎯 SEGMENTATION QUALITY (Pixel Accuracy & IoU):")
         @printf("  Pixel Accuracy: %.2f%%\n", (sum(is_cell_py .== is_cell_jl) / length(masks_py)) * 100)
-        @printf("  IoU Binario:    %.2f%% (Soil/Soil sovrapposizione)\n", iou_binary * 100)
+        @printf("  Binary IoU:    %.2f%% (Soil/Soil overlap)\n", iou_binary * 100)
 
-        # 4. Distribuzione Aree per Range (Nuovo)
-        println("\n📊 CELLULE PER DIMENSIONE (Range px²):")
+        println("\n CELLS PER DIMENSION (Range px²):")
         ranges = [(0, 500), (500, 1000), (1000, 2000), (2000, 5000), (5000, Inf)]
         println("  Range (px²)      | Python | Julia | Diff")
         println("  ------------------------------------------")
@@ -119,51 +119,44 @@ function main()
             println("  $(lpad(range_str, 14)) | $(lpad(count_py, 6)) | $(lpad(count_jl, 5)) | $(diff > 0 ? "-" : "+")$(abs(diff))")
         end
 
-        # 5. Analisi Errori (Nuovo)
-        println("\n❌ ANALISI DISACCORDI:")
+        println("\n ANALYSIS OF ERRORS:")
         false_neg = sum(is_cell_py .& .!is_cell_jl) # Python vede, Julia no
         false_pos = sum(.!is_cell_py .& is_cell_jl) # Julia vede, Python no
         
-        println("  Falsi Negativi (Pixel persi da Julia): $false_neg")
-        println("  Falsi Positivi (Pixel extra da Julia): $false_pos")
+        println("  False Negatives (Pixels lost by Julia) : $false_neg")
+        println("  False Positives (Extra pixels by Julia): $false_pos")
         
-        # Stima dimensione media errori
         if false_neg > 0
-            # Calcolo approssimativo basato sui pixel persi e il numero di cellule perse
-            # Non avendo un matching 1:1 esatto, usiamo la media dei pixel persi divisa la stima di cellule perse
             avg_loss_per_cell = false_neg / max(1, diff_cells)
-            println("  ➤ Stima dimensione cellule 'perse': ~$(round(Int, avg_loss_per_cell)) px/cellula (media teorica)")
+            println("  ➤ Estimated size of 'lost' cells    : ~$(round(Int, avg_loss_per_cell)) px/cell (theoretical average)")
         end
         
         if false_pos > 0
             avg_gain_per_cell = false_pos / max(1, diff_cells)
-            println("  ➤ Stima dimensione cellule 'extra'  : ~$(round(Int, avg_gain_per_cell)) px/cellula (media teorica)")
+            println("  ➤ Estimated size of 'extra' cells   : ~$(round(Int, avg_gain_per_cell)) px/cell (theoretical average)")
         end
 
-        # 6. Generazione Mappa Differenze
-        println("\n🎨 Generazione mappa differenze...")
+        println("\nGenerating difference map...")
         diff_map = create_diff_map(masks_py, masks_jl)
         save(OUTPUT_DIFF, diff_map)
-        println("  Mappa salvata in: $OUTPUT_DIFF")
-        println("  Legenda: Giallo=Accordo ID | Verde=Solo Python | Rosso=Solo Julia | Blu=Disaccordo ID")
+        println("  Difference map saved in: $OUTPUT_DIFF")
+        println("  Legend: Yellow=ID Agreement | Green=Python Only | Red=Julia Only | Blue=ID Disagreement | Black=Background")
 
-        # VERDETTO FINALE
         println("\n==================================================")
         if iou_binary > 0.80
-            println("✅ ESITO: ECCELLENTE. Le versioni sono altamente correlate.")
+            println("OUTCOME: EXCELLENT. Versions are highly related")
         elseif iou_binary > 0.60
-            println("⚠️ ESITO: BUONO. Ci sono differenze sistematiche (probabilmente soglia/fusione), ma la struttura è preservata.")
+            println("OUTCOME: GOOD. There are systematic differences (probably threshold/fusion), but the structure is preserved.")
         else
-            println("❌ ESITO: DA RIVEDERE. Le differenze sono significative.")
+            println("OUTCOME: TO REVIEW. The differences are significant.")
         end
         println("==================================================")
 
     catch e
-        println("\n❌ ERRORE DURANTE L'ESECUZIONE:")
+        println("\nERROR OCCURRED IN EXECUTION:")
         println(e)
-        println("\nVerifica che i percorsi dei file siano corretti nel codice.")
+        println("\nVerify that the file paths are correct in the code.")
     end
 end
 
-# Avvio dello script
 main()
