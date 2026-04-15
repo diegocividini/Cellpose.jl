@@ -189,24 +189,43 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
     p = follow_flows(dP_dyn, niter=niter)
 
     # 1. Mappa di destinazione (istogramma dei flussi)
-    seg = zeros(Int32, H, W)
+    seg = zeros(Float32, H, W) # Float32 per smoothing
     @inbounds for x in 1:W, y in 1:H
         if iscell[y, x]
             py = clamp(round(Int, p[1, y, x]), 1, H)
             px = clamp(round(Int, p[2, y, x]), 1, W)
-            seg[py, px] += 1
+            seg[py, px] += 1.0f0
         end
     end
 
-    # 2. Identificazione seed (massimi locali + soglia)
+    # 🛠️ FIX: Smoothing della mappa seg per fondere picchi vicini
+    seg_smooth = zeros(Float32, H, W)
+    @inbounds for y in 2:H-1, x in 2:W-1
+        seg_smooth[y,x] = (seg[y-1,x-1] + seg[y-1,x] + seg[y-1,x+1] +
+                            seg[y,x-1]   + seg[y,x]   + seg[y,x+1] +
+                            seg[y+1,x-1] + seg[y+1,x] + seg[y+1,x+1]) / 9.0f0
+    end
+    # Copia bordi per evitare buchi
+    seg_smooth[1,:] .= seg[1,:]; seg_smooth[H,:] .= seg[H,:]
+    seg_smooth[:,1] .= seg[:,1]; seg_smooth[:,W] .= seg[:,W]
+
+    # 2. Identificazione seed sulla mappa SMOOTHATA
     seeds = zeros(Bool, H, W)
-    min_hist = 25
+    min_hist = 15.0f0
+    
+    # Trova massimi locali sulla mappa smoothata
+    seg_local_max = similar(seg_smooth)
+    @inbounds for y in 2:H-1, x in 2:W-1
+        seg_local_max[y,x] = max(seg_smooth[y-1,x-1], seg_smooth[y-1,x], seg_smooth[y-1,x+1],
+                                    seg_smooth[y,x-1],   seg_smooth[y,x],   seg_smooth[y,x+1],
+                                    seg_smooth[y+1,x-1], seg_smooth[y+1,x], seg_smooth[y+1,x+1])
+    end
     
     @inbounds for x in 2:W-1, y in 2:H-1
-        if seg[y, x] >= min_hist
+        if seg_local_max[y, x] >= min_hist
             is_max = true
             for dy in -1:1, dx in -1:1
-                if seg[y+dy, x+dx] > seg[y, x]
+                if seg_smooth[y+dy, x+dx] > seg_smooth[y, x] + 0.1f0
                     is_max = false; break
                 end
             end
@@ -402,7 +421,7 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     println("📊 % cell pixels (>0.0): ", sum(cellprob_crop .> 0.0f0) / length(cellprob_crop) * 100)
 
     # Test with theshold = 0.0f0 to check if we can get more seeds (even if some are false positives)
-    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=-0.5, flow_threshold=0.0, min_size=15)
+    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=-0.5, flow_threshold=0.0, min_size=20)
     
     println("dP range: ", extrema(dP_crop))
     println("cellprob range: ", extrema(cellprob_crop))
