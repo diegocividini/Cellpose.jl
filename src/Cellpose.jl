@@ -179,8 +179,8 @@ function remove_small_masks!(masks::AbstractMatrix{<:Integer}; min_size::Int=15)
 end
 
 function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T}; 
-                        niter::Int=200, cellprob_threshold::Float64=-0.5, 
-                        flow_threshold::Float64=0.0, min_size::Int=15) where T
+                        niter::Int=200, cellprob_threshold::Float64=-1.5, # MODIFICA: Soglia molto più bassa
+                        flow_threshold::Float64=0.0, min_size::Int=5) where T # MODIFICA: min_size basso
     H, W = size(cellprob)
     iscell = cellprob .> cellprob_threshold
     dP_dyn = copy(dP) ./ 5.0f0
@@ -188,7 +188,6 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
     println("   --> Following flows...")
     p = follow_flows(dP_dyn, niter=niter)
 
-    # 1. Mappa di destinazione (istogramma dei flussi)
     seg = zeros(Float32, H, W)
     @inbounds for x in 1:W, y in 1:H
         if iscell[y, x]
@@ -198,27 +197,28 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         end
     end
 
-    # 🛠️ FIX: Smoothing 5x5 per fondere picchi vicini (cellule grandi)
+    # 🛠️ FIX 1: Smoothing 3x3 INVECE di 5x5
+    # Il 5x5 uccideva le cellule piccole spargendo troppo il segnale.
     seg_smooth = zeros(Float32, H, W)
-    @inbounds for y in 3:H-2, x in 3:W-2
+    @inbounds for y in 2:H-1, x in 2:W-1
         seg_smooth[y,x] = (
-            seg[y-2,x-2] + seg[y-2,x-1] + seg[y-2,x] + seg[y-2,x+1] + seg[y-2,x+2] +
-            seg[y-1,x-2] + seg[y-1,x-1] + seg[y-1,x] + seg[y-1,x+1] + seg[y-1,x+2] +
-            seg[y,x-2]   + seg[y,x-1]   + seg[y,x]   + seg[y,x+1]   + seg[y,x+2]   +
-            seg[y+1,x-2] + seg[y+1,x-1] + seg[y+1,x] + seg[y+1,x+1] + seg[y+1,x+2] +
-            seg[y+2,x-2] + seg[y+2,x-1] + seg[y+2,x] + seg[y+2,x+1] + seg[y+2,x+2]
-        ) / 25.0f0
+            seg[y-1,x-1] + seg[y-1,x] + seg[y-1,x+1] +
+            seg[y,x-1]   + seg[y,x]   + seg[y,x+1]   +
+            seg[y+1,x-1] + seg[y+1,x] + seg[y+1,x+1]
+        ) / 9.0f0
     end
-    # Gestione bordi (copia semplice per evitare artefatti)
-    seg_smooth[1:2,:] .= seg[1:2,:]; seg_smooth[H-1:H,:] .= seg[H-1:H,:]
-    seg_smooth[:,1:2] .= seg[:,1:2]; seg_smooth[:,W-1:W] .= seg[:,W-1:W]
+    # Bordi (copia diretta per evitare crash)
+    seg_smooth[1,:] .= seg[1,:]; seg_smooth[H,:] .= seg[H,:]
+    seg_smooth[:,1] .= seg[:,1]; seg_smooth[:,W] .= seg[:,W]
 
-    # 2. Identificazione seed sulla mappa SMOOTHATA
-    seeds = zeros(Bool, H, W)
-    min_hist = 20.0f0  # Leggermente più alto perché la media su 25 pixel abbassa i valori
+    # 🛠️ FIX 2: Soglia dinamica per i seed
+    # Una cellula piccola ha pochi pixel. Una soglia fissa a 20 era troppo alta.
+    min_hist = 5.0f0 
     
-    # Trova massimi locali sulla mappa smoothata (con finestra 3x3 per precisione)
+    seeds = zeros(Bool, H, W)
     seg_local_max = similar(seg_smooth)
+    
+    # Massimi locali 3x3
     @inbounds for y in 2:H-1, x in 2:W-1
         seg_local_max[y,x] = max(seg_smooth[y-1,x-1], seg_smooth[y-1,x], seg_smooth[y-1,x+1],
                                     seg_smooth[y,x-1],   seg_smooth[y,x],   seg_smooth[y,x+1],
@@ -229,8 +229,8 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         if seg_local_max[y, x] >= min_hist
             is_max = true
             for dy in -1:1, dx in -1:1
-                # Tolleranza stretta per evitare picchi piatti
-                if seg_smooth[y+dy, x+dx] > seg_smooth[y, x] + 0.05f0
+                # Tolleranza ridotta per favorire la creazione di semi vicini (aumentare recall)
+                if seg_smooth[y+dy, x+dx] > seg_smooth[y, x] + 0.01f0
                     is_max = false; break
                 end
             end
@@ -238,7 +238,9 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         end
     end
 
-    # 3. Etichettatura componenti connesse dei seed (BFS ottimizzato)
+    # ... (Il resto del codice BFS per l'etichettatura resta identico) ...
+    # Copia qui il blocco di etichettatura che hai già (da `labels = zeros` fino a `println("   --> Found ...")`)
+    
     labels = zeros(Int32, H, W)
     current_id = 0
     queue = Vector{Tuple{Int, Int}}(undef, H*W)
@@ -264,7 +266,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
     end
     println("   --> Found $(current_id) seed points")
 
-    # 4. Assegnazione diretta: ogni pixel prende l'ID del punto di arrivo
+    # 4. Assegnazione diretta
     masks = zeros(Int32, H, W)
     @inbounds for x in 1:W, y in 1:H
         if iscell[y, x]
@@ -274,17 +276,17 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         end
     end
 
-    # 5. Cleanup dimensioni
+    # 5. Cleanup
     println("   --> Removing small masks...")
     remove_small_masks!(masks; min_size=min_size)
 
-    # 5.5 Cleanup flussi incoerenti (se flow_threshold > 0)
+    # Flow threshold (se > 0)
     if flow_threshold > 0.0
-        println("   --> Applying flow threshold cleanup ($flow_threshold)...")
+        println("   --> Applying flow threshold cleanup...")
         remove_bad_flow_masks!(masks, dP_dyn; threshold=flow_threshold)
     end
 
-    # 6. Renumera ID consecutivi
+    # 6. Renumera
     uniq = sort!(collect(Set(masks[masks .> 0])))
     if !isempty(uniq)
         id_map = Dict(uniq[i] => Int32(i) for i in 1:length(uniq))
@@ -426,7 +428,7 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     println("📊 % cell pixels (>0.0): ", sum(cellprob_crop .> 0.0f0) / length(cellprob_crop) * 100)
 
     # Test with theshold = 0.0f0 to check if we can get more seeds (even if some are false positives)
-    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=-0.5, flow_threshold=0.0, min_size=20)
+    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=-1.5, flow_threshold=0.0, min_size=5)
     
     println("dP range: ", extrema(dP_crop))
     println("cellprob range: ", extrema(cellprob_crop))
