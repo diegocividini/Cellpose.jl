@@ -189,7 +189,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
     p = follow_flows(dP_dyn, niter=niter)
 
     # 1. Mappa di destinazione (istogramma dei flussi)
-    seg = zeros(Float32, H, W) # Float32 per smoothing
+    seg = zeros(Float32, H, W)
     @inbounds for x in 1:W, y in 1:H
         if iscell[y, x]
             py = clamp(round(Int, p[1, y, x]), 1, H)
@@ -198,22 +198,26 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         end
     end
 
-    # 🛠️ FIX: Smoothing della mappa seg per fondere picchi vicini
+    # 🛠️ FIX: Smoothing 5x5 per fondere picchi vicini (cellule grandi)
     seg_smooth = zeros(Float32, H, W)
-    @inbounds for y in 2:H-1, x in 2:W-1
-        seg_smooth[y,x] = (seg[y-1,x-1] + seg[y-1,x] + seg[y-1,x+1] +
-                            seg[y,x-1]   + seg[y,x]   + seg[y,x+1] +
-                            seg[y+1,x-1] + seg[y+1,x] + seg[y+1,x+1]) / 9.0f0
+    @inbounds for y in 3:H-2, x in 3:W-2
+        seg_smooth[y,x] = (
+            seg[y-2,x-2] + seg[y-2,x-1] + seg[y-2,x] + seg[y-2,x+1] + seg[y-2,x+2] +
+            seg[y-1,x-2] + seg[y-1,x-1] + seg[y-1,x] + seg[y-1,x+1] + seg[y-1,x+2] +
+            seg[y,x-2]   + seg[y,x-1]   + seg[y,x]   + seg[y,x+1]   + seg[y,x+2]   +
+            seg[y+1,x-2] + seg[y+1,x-1] + seg[y+1,x] + seg[y+1,x+1] + seg[y+1,x+2] +
+            seg[y+2,x-2] + seg[y+2,x-1] + seg[y+2,x] + seg[y+2,x+1] + seg[y+2,x+2]
+        ) / 25.0f0
     end
-    # Copia bordi per evitare buchi
-    seg_smooth[1,:] .= seg[1,:]; seg_smooth[H,:] .= seg[H,:]
-    seg_smooth[:,1] .= seg[:,1]; seg_smooth[:,W] .= seg[:,W]
+    # Gestione bordi (copia semplice per evitare artefatti)
+    seg_smooth[1:2,:] .= seg[1:2,:]; seg_smooth[H-1:H,:] .= seg[H-1:H,:]
+    seg_smooth[:,1:2] .= seg[:,1:2]; seg_smooth[:,W-1:W] .= seg[:,W-1:W]
 
     # 2. Identificazione seed sulla mappa SMOOTHATA
     seeds = zeros(Bool, H, W)
-    min_hist = 15.0f0
+    min_hist = 20.0f0  # Leggermente più alto perché la media su 25 pixel abbassa i valori
     
-    # Trova massimi locali sulla mappa smoothata
+    # Trova massimi locali sulla mappa smoothata (con finestra 3x3 per precisione)
     seg_local_max = similar(seg_smooth)
     @inbounds for y in 2:H-1, x in 2:W-1
         seg_local_max[y,x] = max(seg_smooth[y-1,x-1], seg_smooth[y-1,x], seg_smooth[y-1,x+1],
@@ -225,7 +229,8 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         if seg_local_max[y, x] >= min_hist
             is_max = true
             for dy in -1:1, dx in -1:1
-                if seg_smooth[y+dy, x+dx] > seg_smooth[y, x] + 0.1f0
+                # Tolleranza stretta per evitare picchi piatti
+                if seg_smooth[y+dy, x+dx] > seg_smooth[y, x] + 0.05f0
                     is_max = false; break
                 end
             end
