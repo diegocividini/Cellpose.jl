@@ -195,7 +195,7 @@ function remove_giant_masks!(masks::AbstractMatrix{<:Integer}; max_size::Int=250
 end
 
 function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T}; 
-                        niter::Int=200, cellprob_threshold::Float64=-1.5, 
+                        niter::Int=200, cellprob_threshold::Float64=-1.0, # MODIFICA: -1.0 invece di -1.5
                         flow_threshold::Float64=0.0, min_size::Int=5) where T
     H, W = size(cellprob)
     iscell = cellprob .> cellprob_threshold
@@ -213,7 +213,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         end
     end
 
-    # 🛠️ FIX: Smoothing 3x3 INVECE di 5x5 (Preserva i picchi delle cellule piccole)
+    # Smoothing 3x3
     seg_smooth = zeros(Float32, H, W)
     @inbounds for y in 2:H-1, x in 2:W-1
         seg_smooth[y,x] = (
@@ -222,17 +222,14 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
             seg[y+1,x-1] + seg[y+1,x] + seg[y+1,x+1]
         ) / 9.0f0
     end
-    # Bordi (copia diretta per evitare crash)
     seg_smooth[1,:] .= seg[1,:]; seg_smooth[H,:] .= seg[H,:]
     seg_smooth[:,1] .= seg[:,1]; seg_smooth[:,W] .= seg[:,W]
 
-    # 🛠️ FIX: Soglia dinamica per i seed (più bassa per recuperare recall)
     min_hist = 5.0f0 
     
     seeds = zeros(Bool, H, W)
     seg_local_max = similar(seg_smooth)
     
-    # Massimi locali 3x3
     @inbounds for y in 2:H-1, x in 2:W-1
         seg_local_max[y,x] = max(seg_smooth[y-1,x-1], seg_smooth[y-1,x], seg_smooth[y-1,x+1],
                                     seg_smooth[y,x-1],   seg_smooth[y,x],   seg_smooth[y,x+1],
@@ -243,7 +240,6 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         if seg_local_max[y, x] >= min_hist
             is_max = true
             for dy in -1:1, dx in -1:1
-                # Tolleranza ridotta per favorire la creazione di semi vicini
                 if seg_smooth[y+dy, x+dx] > seg_smooth[y, x] + 0.01f0
                     is_max = false; break
                 end
@@ -252,7 +248,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         end
     end
 
-    # Etichettatura componenti connesse dei seed (BFS ottimizzato)
+    # BFS Etichettatura
     labels = zeros(Int32, H, W)
     current_id = 0
     queue = Vector{Tuple{Int, Int}}(undef, H*W)
@@ -278,7 +274,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
     end
     println("   --> Found $(current_id) seed points")
 
-    # 4. Assegnazione diretta: ogni pixel prende l'ID del punto di arrivo
+    # Assegnazione
     masks = zeros(Int32, H, W)
     @inbounds for x in 1:W, y in 1:H
         if iscell[y, x]
@@ -288,16 +284,16 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         end
     end
 
-    # 5. Cleanup dimensioni (minime)
+    # 1. Rimuovi piccoli
     println("   --> Removing small masks...")
     remove_small_masks!(masks; min_size=min_size)
 
-    # 🛠️ NUOVO: Rimuovi SOLO le fusioni giganti (es. > 2500px)
-    # Questo evita di usare flow_threshold che cancella troppo, ma pulisce il conteggio dalle macro-fusioni.
-    println("   --> Removing giant masks (likely merges)...")
-    remove_giant_masks!(masks; max_size=2500) 
+    # 🛠️ AGGRESSIVO: Rimuovi maschere > 1200px (sono quasi sicuramente fusioni)
+    # Questo è il taglio netto per abbattere il conteggio da 3300 a 2500
+    println("   --> Removing giant masks (>1200px)...")
+    remove_giant_masks!(masks; max_size=1200) 
 
-    # 6. Renumera ID consecutivi
+    # 2. Renumera ID
     uniq = sort!(collect(Set(masks[masks .> 0])))
     if !isempty(uniq)
         id_map = Dict(uniq[i] => Int32(i) for i in 1:length(uniq))
@@ -442,7 +438,7 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     # cellprob_threshold=-1.5 -> Massima copertura (recupera verde)
     # flow_threshold=0.0 -> Non cancellare per forma (evita buchi)
     # min_size=5 -> Accetta frammenti piccoli
-    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=-1.5, flow_threshold=0.0, min_size=5)
+    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=-1.0, flow_threshold=0.0, min_size=5)
     
     println("dP range: ", extrema(dP_crop))
     println("cellprob range: ", extrema(cellprob_crop))
