@@ -291,7 +291,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
     # 🛠️ AGGRESSIVO: Rimuovi maschere > 1200px (sono quasi sicuramente fusioni)
     # Questo è il taglio netto per abbattere il conteggio da 3300 a 2500
     println("   --> Removing giant masks (>2000px)...")
-    remove_giant_masks!(masks; max_size=2000) 
+    remove_giant_masks!(masks; max_size=1800) 
 
     # 2. Renumera ID
     uniq = sort!(collect(Set(masks[masks .> 0])))
@@ -438,7 +438,7 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     # cellprob_threshold=-1.5 -> Massima copertura (recupera verde)
     # flow_threshold=0.0 -> Non cancellare per forma (evita buchi)
     # min_size=5 -> Accetta frammenti piccoli
-    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=-0.5, flow_threshold=0.0, min_size=10)
+    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=-0.3, flow_threshold=0.0, min_size=15)
     
     println("dP range: ", extrema(dP_crop))
     println("cellprob range: ", extrema(cellprob_crop))
