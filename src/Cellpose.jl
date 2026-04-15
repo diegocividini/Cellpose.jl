@@ -428,7 +428,7 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     println("📊 % cell pixels (>0.0): ", sum(cellprob_crop .> 0.0f0) / length(cellprob_crop) * 100)
 
     # Test with theshold = 0.0f0 to check if we can get more seeds (even if some are false positives)
-    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=-1.5, flow_threshold=0.0, min_size=5)
+    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=0.0, flow_threshold=0.4, min_size=15)
     
     println("dP range: ", extrema(dP_crop))
     println("cellprob range: ", extrema(cellprob_crop))
