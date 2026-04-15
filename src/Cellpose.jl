@@ -225,7 +225,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
     seg_smooth[1,:] .= seg[1,:]; seg_smooth[H,:] .= seg[H,:]
     seg_smooth[:,1] .= seg[:,1]; seg_smooth[:,W] .= seg[:,W]
 
-    eeds = zeros(Bool, H, W)
+    seeds = zeros(Bool, H, W)
     min_hist = 5.0f0  # La tua soglia che funzionava
     
     seg_local_max = similar(seg_smooth)
