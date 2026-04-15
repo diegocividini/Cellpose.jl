@@ -200,7 +200,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
 
     # 2. Identificazione seed (massimi locali + soglia)
     seeds = zeros(Bool, H, W)
-    min_hist = 20
+    min_hist = 25
     
     @inbounds for x in 2:W-1, y in 2:H-1
         if seg[y, x] >= min_hist
@@ -402,7 +402,7 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     println("📊 % cell pixels (>0.0): ", sum(cellprob_crop .> 0.0f0) / length(cellprob_crop) * 100)
 
     # Test with theshold = 0.0f0 to check if we can get more seeds (even if some are false positives)
-    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=-0.2, flow_threshold=0.4, min_size=30)
+    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=-0.2, flow_threshold=0.0, min_size=40)
     
     println("dP range: ", extrema(dP_crop))
     println("cellprob range: ", extrema(cellprob_crop))
