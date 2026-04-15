@@ -254,6 +254,12 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
     println("   --> Removing small masks...")
     remove_small_masks!(masks; min_size=min_size)
 
+    # 5.5 Cleanup flussi incoerenti (se flow_threshold > 0)
+    if flow_threshold > 0.0
+        println("   --> Applying flow threshold cleanup ($flow_threshold)...")
+        remove_bad_flow_masks!(masks, dP_dyn; threshold=flow_threshold)
+    end
+
     # 6. Renumera ID consecutivi
     uniq = sort!(collect(Set(masks[masks .> 0])))
     if !isempty(uniq)
