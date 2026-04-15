@@ -15,26 +15,26 @@ export normalize99, prepare_tensor, segment, compute_masks, save_masks, estimate
 
 """
     follow_flows(dP::AbstractArray{T, 3}; niter::Int=200) where T
-    
-    Follows the flow vectors (dP) for niter iterations to compute the final positions of pixels.
-    Returns a 3D array where the first dimension contains the final y and x coordinates for each pixel.
+
+    Moves each pixel according to the flow vectors (dP) for niter iterations.
+    Returns the final positions of each pixel after following the flows.
 """
 function follow_flows(dP::AbstractArray{T, 3}; niter::Int=200) where T
     _, H, W = size(dP)
-    p = zeros(T, 2, H, W)
+    p = zeros(Float64, 2, H, W)
     
-    @inbounds for y in 1:H, x in 1:W
-        p[1, y, x] = T(y)
-        p[2, y, x] = T(x)
+    @inbounds for x in 1:W, y in 1:H
+        p[1, y, x] = Float64(y)
+        p[2, y, x] = Float64(x)
     end
     
-    dP_1 = T(dP[1, :, :])
-    dP_2 = T(dP[2, :, :])
+    dP_1 = Float64.(dP[1, :, :])
+    dP_2 = Float64.(dP[2, :, :])
     
     Hm1, Wm1 = H - 1, W - 1
 
     for _ in 1:niter
-        @inbounds for y in 1:H, x in 1:W
+        @inbounds for x in 1:W, y in 1:H
             py = p[1, y, x]
             px = p[2, y, x]
             
@@ -44,9 +44,10 @@ function follow_flows(dP::AbstractArray{T, 3}; niter::Int=200) where T
             wx = clamp(px - x0, 0.0, 1.0)
             y1, x1 = y0 + 1, x0 + 1
             
-            # Bilinear interpolation of the flow vectors
+            # Bilinear DY (Float64)
             dy = (1.0-wy)*(1.0-wx)*dP_1[y0, x0] + wy*(1.0-wx)*dP_1[y1, x0] + 
                     (1.0-wy)*wx*dP_1[y0, x1] + wy*wx*dP_1[y1, x1]
+            # Bilinear DX (Float64)
             dx = (1.0-wy)*(1.0-wx)*dP_2[y0, x0] + wy*(1.0-wx)*dP_2[y1, x0] + 
                     (1.0-wy)*wx*dP_2[y0, x1] + wy*wx*dP_2[y1, x1]
             
@@ -60,8 +61,8 @@ end
 """
     masks_to_flows(masks::AbstractMatrix{<:Integer})
 
-    Calculates the theoretical (ideal) flows from 2D masks.
-    Returns a 3D array where the first dimension contains the flow vectors (dy, dx) for each pixel.
+    Calculates the theoretical (ideal) flows from 2D masks. 
+    This is a reference function for comparing results with the GPU version.
 """
 function masks_to_flows(masks::AbstractMatrix{<:Integer})
     H, W = size(masks)
@@ -137,6 +138,8 @@ end
     remove_bad_flow_masks!(masks::AbstractMatrix{<:Integer}, dP::AbstractArray{<:AbstractFloat, 3}; threshold=0.4f0)
 
     It deletes masks (cells) whose theoretical flow (calculated from the mask) does not match the flow predicted by the network (dP).
+    It calculates the mean squared error between the theoretical flow and the predicted flow for each mask, 
+    and removes those whose error exceeds the specified threshold (default 0.4).
 """
 function remove_bad_flow_masks!(masks::AbstractMatrix{<:Integer}, dP::AbstractArray{<:AbstractFloat, 3}; threshold=0.4f0)
     mu = masks_to_flows(masks)
@@ -166,11 +169,10 @@ function remove_bad_flow_masks!(masks::AbstractMatrix{<:Integer}, dP::AbstractAr
     return masks
 end
 
-
 """
     remove_small_masks!(masks::AbstractMatrix{<:Integer}; min_size::Int=15)
 
-    Deletes masks (cells) smaller than the specified minimum size (default 15 pixels).
+    It deletes masks (cells) whose area is smaller than the specified minimum size (default 15 pixels).
 """
 function remove_small_masks!(masks::AbstractMatrix{<:Integer}; min_size::Int=15)
     n_masks = maximum(masks)
@@ -197,7 +199,7 @@ end
 """
     remove_giant_masks!(masks::AbstractMatrix{<:Integer}; max_size::Int=2500)
 
-    Deletes masks (cells) larger than the specified maximum size (default 2500 pixels).
+    It deletes masks (cells) whose area is larger than the specified maximum size (default 2500 pixels).
 """
 function remove_giant_masks!(masks::AbstractMatrix{<:Integer}; max_size::Int=2500)
     n_masks = maximum(masks)
@@ -220,9 +222,9 @@ end
 """
     estimate_diameter(cellprob::AbstractMatrix; threshold=0.0f0)
 
-    Estimates the cell diameter from the cell probability map using a simple connected component analysis.
-    It applies a threshold to the cell probability map to create a binary mask, 
-    then identifies connected components (potential cells) and calculates their areas.
+    Estimates the cell diameter from the cell probability map.
+    It identifies connected components in the cell probability map (after thresholding), calculates their areas, 
+    and estimates the diameter as 2*sqrt(median_area/π).
 """
 function estimate_diameter(cellprob::AbstractMatrix{T}; threshold::T=0.0f0) where T
     H, W = size(cellprob)
@@ -232,7 +234,7 @@ function estimate_diameter(cellprob::AbstractMatrix{T}; threshold::T=0.0f0) wher
     current_id = 0
     queue = Vector{Tuple{Int, Int}}(undef, H * W)
 
-    @inbounds for y in 1:H, x in 1:W
+    @inbounds for x in 1:W, y in 1:H
         if binary[y, x] && labels[y, x] == 0
             current_id += 1
             labels[y, x] = current_id
@@ -279,10 +281,8 @@ end
                     flow_threshold::Float64=0.0, min_size::Int=100, 
                     max_size::Int=1800) where T
 
-    Computes the masks from the flow vectors (dP) and cell probability map.
-    It follows the flows to find the final positions of pixels, identifies seed points based on local maxima,
-    and then expands these seeds to create the final masks. It also includes cleanup steps to remove small and giant masks.
-    Returns a 2D array where each pixel's value corresponds to the mask ID it belongs to (0 for background).
+    Computes the segmentation masks from the predicted flows (dP) and cell probability map (cellprob).
+    It follows the flows to find seed points, performs a BFS-based labeling, and applies size-based filtering.
 """
 function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T}; 
                         niter::Int=200, cellprob_threshold::Float64=0.0,
@@ -296,7 +296,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
     p = follow_flows(dP_dyn, niter=niter)
 
     seg = zeros(Float32, H, W)
-    @inbounds for y in 1:H, x in 1:W
+    @inbounds for x in 1:W, y in 1:H
         if iscell[y, x]
             py = clamp(round(Int, p[1, y, x]), 1, H)
             px = clamp(round(Int, p[2, y, x]), 1, W)
@@ -338,13 +338,13 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         end
     end
 
-    # BFS to label seeds
+    # BFS labeling
     labels = zeros(Int32, H, W)
     current_id = 0
     queue = Vector{Tuple{Int, Int}}(undef, H*W)
     head = 1; tail = 0
 
-    @inbounds for y in 1:H, x in 1:W
+    @inbounds for x in 1:W, y in 1:H
         if seeds[y, x] && labels[y, x] == 0
             current_id += 1
             labels[y, x] = current_id
@@ -365,7 +365,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
     println("   --> Found $(current_id) seed points")
 
     masks = zeros(Int32, H, W)
-    @inbounds for y in 1:H, x in 1:W
+    @inbounds for x in 1:W, y in 1:H
         if iscell[y, x]
             py = clamp(round(Int, p[1, y, x]), 1, H)
             px = clamp(round(Int, p[2, y, x]), 1, W)
@@ -380,7 +380,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
     println("   --> Removing giant masks (max=$(max_size)px)...")
     remove_giant_masks!(masks; max_size=max_size)
 
-    # Renumbers IDs to be consecutive starting from 1, and prints the final count of masks.
+    # Reassign IDs to be consecutive starting from 1
     uniq = sort!(collect(Set(masks[masks .> 0])))
     if !isempty(uniq)
         id_map = Dict(uniq[i] => Int32(i) for i in 1:length(uniq))
@@ -399,8 +399,8 @@ end
 """
     normalize99(img::AbstractArray)
 
-    Normalizes the image by scaling pixel values to the range [0, 1] based on the 1st and 99th percentiles.
-    This method is robust to outliers and ensures that the majority of pixel values are well-distributed in the normalized range.
+    Normalizes the image by scaling pixel values to the [0, 1] range based on the 1st and 99th percentiles.
+    This method is robust to outliers and preserves contrast in the main intensity range of the image.
 """
 function normalize99(img::AbstractArray)
     out = zeros(Float32, size(img))
@@ -424,8 +424,8 @@ end
 """
     prepare_tensor(tile_norm::AbstractArray)
 
-    Prepares a normalized image tile for input into the ONNX model by converting it to a 4D tensor with shape (1, 3, H, W).
-    If the input tile has only 1 channel, it replicates it across the 3 channels. If it has more than 3 channels, it takes only the first 3.
+    Prepares a normalized image tile for ONNX inference by converting it to a 4D tensor with shape (1, 3, H, W).
+    If the input tile has 2 dimensions, it is replicated across the 3 channels. If it has 3 dimensions, the first 3 channels are used.
 """
 function prepare_tensor(tile_norm::AbstractArray)
     H, W = size(tile_norm)[1:2]
@@ -446,9 +446,8 @@ end
 """
     pad_reflect(img::AbstractArray, pad_h::Int, pad_w::Int)
 
-    Pads the input image by reflecting its borders. The padding is applied to the bottom and right sides of the image.
-    This method is used to ensure that the image dimensions are compatible with the tile size required by the ONNX model, 
-    while minimizing edge artifacts during inference.
+    Pads the image by reflecting its borders. The padding size is specified by pad_h (vertical) and pad_w (horizontal).
+    This method creates a seamless extension of the image, which can help reduce edge artifacts during inference.
 """
 function pad_reflect(img::AbstractArray, pad_h::Int, pad_w::Int)
     H, W = size(img)[1:2]
@@ -469,13 +468,10 @@ function pad_reflect(img::AbstractArray, pad_h::Int, pad_w::Int)
 end
 
 """
-    segment(img::AbstractArray, model_path::String; 
-            use_gpu::Bool=false, 
-            diameter::Float64=0.0)
+    segment(img::AbstractArray, model_path::String; use_gpu::Bool=false, diameter::Float64=0.0)
 
-    Main function to perform cell segmentation on the input image using a pre-trained ONNX model.
+    Main function to perform segmentation on the input image using a pre-trained ONNX model.
     It handles image normalization, tiling, inference, stitching of results, and final mask computation.
-    The `diameter` parameter can be set to 0.0 for automatic estimation or provided by the user for better accuracy.
 """
 function segment(img::AbstractArray, model_path::String; 
                     use_gpu::Bool=false, 
@@ -551,7 +547,6 @@ function segment(img::AbstractArray, model_path::String;
     println("cellprob range: ", extrema(cellprob_crop))
     println("% cell pixels (>0.0): ", sum(cellprob_crop .> 0.0f0) / length(cellprob_crop) * 100)
 
-    # Automatic diameter estimation if not provided by the user
     if diameter <= 0.0
         diameter = estimate_diameter(cellprob_crop)
         println("Estimated cell diameter: $(round(diameter, digits=1)) px")
@@ -559,12 +554,12 @@ function segment(img::AbstractArray, model_path::String;
         println("Using user-defined diameter: $(diameter) px")
     end
 
-    # Dynamic parameter adjustment based on estimated diameter
+    # Estimation of min_size and max_size based on diameter
     min_size = max(15, round(Int, (diameter^2) / 10.0))
     max_size = round(Int, (diameter^2) * 2.5)
     println("   --> Auto-computed min_size: $(min_size)px | max_size: $(max_size)px")
 
-    # Final mask computation with dynamic parameters
+    # Execution of segmentation with dynamic parameters
     masks = compute_masks(dP_crop, cellprob_crop; 
                             niter=200, 
                             cellprob_threshold=0.0, 
@@ -579,8 +574,8 @@ end
 """
     segment(img_path::String, model_path::String; use_gpu::Bool=false, diameter::Float64=0.0)
 
-    Overloaded version of the `segment` function that accepts a file path to an image instead of an array.
-    It loads the image, converts it to the appropriate format, and then calls the main `segment` function to perform segmentation.
+    Overload of the `segment` function that accepts an image file path instead of an array.
+    It loads the image, converts it to the appropriate format, and then calls the main `segment` function.
 """
 function segment(img_path::String, model_path::String; use_gpu::Bool=false, diameter::Float64=0.0)
     println("Loading image from: $img_path ...")
@@ -598,8 +593,9 @@ end
 """
     save_masks(img_path::String, masks::AbstractMatrix{<:Integer}, output_path::String)
 
-    Saves the computed masks in two formats: a 16-bit TIFF file for analytical use and a PNG overlay for visual inspection.
-    The TIFF file contains the raw mask IDs, while the PNG overlay combines the original image with colored masks to highlight segmented cells.
+    Saves the segmentation masks in two formats: 
+    1) A 16-bit TIFF file where each pixel's value corresponds to its mask ID (analytical format).
+    2) A PNG image with colored overlays on the original image for visualization (visual format).
 """
 function save_masks(img_path::String, masks::AbstractMatrix{<:Integer}, output_path::String)
     base_path = replace(output_path, r"\.(tif|tiff|png|jpg|jpeg)$"i => "")
@@ -633,7 +629,7 @@ function save_masks(img_path::String, masks::AbstractMatrix{<:Integer}, output_p
             is_boundary[ny_r, nx_r] .|= (masks[ny_r, nx_r] .!= masks[max(1, 1-dy):min(H, H-dy), max(1, 1-dx):min(W, W-dx)])
         end
         
-        @inbounds for y in 1:H, x in 1:W
+        @inbounds for x in 1:W, y in 1:H
             m = masks[y, x]
             if m > 0
                 c = colors[m + 1]
@@ -647,7 +643,7 @@ function save_masks(img_path::String, masks::AbstractMatrix{<:Integer}, output_p
         end
     end
     save(path_visual, map(c -> RGB{N0f8}(clamp(red(c),0,1), clamp(green(c),0,1), clamp(blue(c),0,1)), overlay))
-    println("  [+] Visual overlay saved in: ", path_visual)
+    println("  [+] Overlay visual saved in: ", path_visual)
     return path_analytical, path_visual
 end
 
