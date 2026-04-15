@@ -441,7 +441,7 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     # cellprob_threshold=-1.5 -> Massima copertura (recupera verde)
     # flow_threshold=0.0 -> Non cancellare per forma (evita buchi)
     # min_size=5 -> Accetta frammenti piccoli
-    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=-0.3, flow_threshold=0.0, min_size=25)
+    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=-0.3, flow_threshold=0.0, min_size=100)
     
     println("dP range: ", extrema(dP_crop))
     println("cellprob range: ", extrema(cellprob_crop))
