@@ -178,9 +178,25 @@ function remove_small_masks!(masks::AbstractMatrix{<:Integer}; min_size::Int=15)
     return masks
 end
 
+# 🛠️ NUOVA FUNZIONE: Rimuove solo le maschere eccessivamente grandi (fusioni)
+function remove_giant_masks!(masks::AbstractMatrix{<:Integer}; max_size::Int=2500)
+    n_masks = maximum(masks)
+    n_masks == 0 && return masks
+    
+    counts = zeros(Int, n_masks)
+    @inbounds for v in masks; v > 0 && (counts[v] += 1); end
+    
+    @inbounds for i in eachindex(masks)
+        m = masks[i]
+        # Se la maschera supera la dimensione massima plausibile, viene azzerata
+        m > 0 && counts[m] > max_size && (masks[i] = 0)
+    end
+    return masks
+end
+
 function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T}; 
-                        niter::Int=200, cellprob_threshold::Float64=-1.5, # MODIFICA: Soglia molto più bassa
-                        flow_threshold::Float64=0.0, min_size::Int=5) where T # MODIFICA: min_size basso
+                        niter::Int=200, cellprob_threshold::Float64=-1.5, 
+                        flow_threshold::Float64=0.0, min_size::Int=5) where T
     H, W = size(cellprob)
     iscell = cellprob .> cellprob_threshold
     dP_dyn = copy(dP) ./ 5.0f0
@@ -197,8 +213,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         end
     end
 
-    # 🛠️ FIX 1: Smoothing 3x3 INVECE di 5x5
-    # Il 5x5 uccideva le cellule piccole spargendo troppo il segnale.
+    # 🛠️ FIX: Smoothing 3x3 INVECE di 5x5 (Preserva i picchi delle cellule piccole)
     seg_smooth = zeros(Float32, H, W)
     @inbounds for y in 2:H-1, x in 2:W-1
         seg_smooth[y,x] = (
@@ -211,8 +226,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
     seg_smooth[1,:] .= seg[1,:]; seg_smooth[H,:] .= seg[H,:]
     seg_smooth[:,1] .= seg[:,1]; seg_smooth[:,W] .= seg[:,W]
 
-    # 🛠️ FIX 2: Soglia dinamica per i seed
-    # Una cellula piccola ha pochi pixel. Una soglia fissa a 20 era troppo alta.
+    # 🛠️ FIX: Soglia dinamica per i seed (più bassa per recuperare recall)
     min_hist = 5.0f0 
     
     seeds = zeros(Bool, H, W)
@@ -229,7 +243,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         if seg_local_max[y, x] >= min_hist
             is_max = true
             for dy in -1:1, dx in -1:1
-                # Tolleranza ridotta per favorire la creazione di semi vicini (aumentare recall)
+                # Tolleranza ridotta per favorire la creazione di semi vicini
                 if seg_smooth[y+dy, x+dx] > seg_smooth[y, x] + 0.01f0
                     is_max = false; break
                 end
@@ -238,9 +252,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         end
     end
 
-    # ... (Il resto del codice BFS per l'etichettatura resta identico) ...
-    # Copia qui il blocco di etichettatura che hai già (da `labels = zeros` fino a `println("   --> Found ...")`)
-    
+    # Etichettatura componenti connesse dei seed (BFS ottimizzato)
     labels = zeros(Int32, H, W)
     current_id = 0
     queue = Vector{Tuple{Int, Int}}(undef, H*W)
@@ -266,7 +278,7 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
     end
     println("   --> Found $(current_id) seed points")
 
-    # 4. Assegnazione diretta
+    # 4. Assegnazione diretta: ogni pixel prende l'ID del punto di arrivo
     masks = zeros(Int32, H, W)
     @inbounds for x in 1:W, y in 1:H
         if iscell[y, x]
@@ -276,17 +288,16 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
         end
     end
 
-    # 5. Cleanup
+    # 5. Cleanup dimensioni (minime)
     println("   --> Removing small masks...")
     remove_small_masks!(masks; min_size=min_size)
 
-    # Flow threshold (se > 0)
-    if flow_threshold > 0.0
-        println("   --> Applying flow threshold cleanup...")
-        remove_bad_flow_masks!(masks, dP_dyn; threshold=flow_threshold)
-    end
+    # 🛠️ NUOVO: Rimuovi SOLO le fusioni giganti (es. > 2500px)
+    # Questo evita di usare flow_threshold che cancella troppo, ma pulisce il conteggio dalle macro-fusioni.
+    println("   --> Removing giant masks (likely merges)...")
+    remove_giant_masks!(masks; max_size=2500) 
 
-    # 6. Renumera
+    # 6. Renumera ID consecutivi
     uniq = sort!(collect(Set(masks[masks .> 0])))
     if !isempty(uniq)
         id_map = Dict(uniq[i] => Int32(i) for i in 1:length(uniq))
@@ -427,8 +438,11 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     println("📊 cellprob range: ", extrema(cellprob_crop))
     println("📊 % cell pixels (>0.0): ", sum(cellprob_crop .> 0.0f0) / length(cellprob_crop) * 100)
 
-    # Test with theshold = 0.0f0 to check if we can get more seeds (even if some are false positives)
-    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=0.0, flow_threshold=0.4, min_size=15)
+    # 🛠️ PARAMETRI AGGIORNATI:
+    # cellprob_threshold=-1.5 -> Massima copertura (recupera verde)
+    # flow_threshold=0.0 -> Non cancellare per forma (evita buchi)
+    # min_size=5 -> Accetta frammenti piccoli
+    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=-1.5, flow_threshold=0.0, min_size=5)
     
     println("dP range: ", extrema(dP_crop))
     println("cellprob range: ", extrema(cellprob_crop))
