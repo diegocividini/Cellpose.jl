@@ -225,33 +225,29 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
     seg_smooth[1,:] .= seg[1,:]; seg_smooth[H,:] .= seg[H,:]
     seg_smooth[:,1] .= seg[:,1]; seg_smooth[:,W] .= seg[:,W]
 
-    seeds = zeros(Bool, H, W)
-    min_hist = 5.0f0 # Mantieni la tua soglia che funzionava bene
+    eeds = zeros(Bool, H, W)
+    min_hist = 5.0f0  # La tua soglia che funzionava
     
-    # 🛠️ FIX: Rilevazione Massimi Locali "Plateau-Aware"
-    # Un punto è seed se è >= min_hist ED È IL MASSIMO LOCALE UNICO (o vince il tie-break)
+    seg_local_max = similar(seg_smooth)
+    
+    # Calcolo massimi locali 3x3
+    @inbounds for y in 2:H-1, x in 2:W-1
+        seg_local_max[y,x] = max(seg_smooth[y-1,x-1], seg_smooth[y-1,x], seg_smooth[y-1,x+1],
+                                    seg_smooth[y,x-1],   seg_smooth[y,x],   seg_smooth[y,x+1],
+                                    seg_smooth[y+1,x-1], seg_smooth[y+1,x], seg_smooth[y+1,x+1])
+    end
+    
+    # Assegnazione seed con tolleranza
     @inbounds for x in 2:W-1, y in 2:H-1
-        val = seg_smooth[y, x]
-        if val >= min_hist
-            is_seed = true
-            # Controlla tutti i vicini 3x3
+        if seg_local_max[y, x] >= min_hist
+            is_max = true
             for dy in -1:1, dx in -1:1
-                if dy == 0 && dx == 0 continue end
-                ny, nx = y + dy, x + dx
-                nval = seg_smooth[ny, nx]
-                
-                if nval > val
-                    is_seed = false; break
-                elseif nval == val
-                    # Gestione Plateau: vince il pixel con coordinate maggiori
-                    # Se esiste un vicino con valore uguale e coordinate maggiori, 
-                    # allora quel vicino sarà il seed, e questo NO.
-                    if (ny > y) || (ny == y && nx > x)
-                        is_seed = false; break
-                    end
+                # Tolleranza classica: scarta solo se c'è un vicino significativamente più alto
+                if seg_smooth[y+dy, x+dx] > seg_smooth[y, x] + 0.01f0
+                    is_max = false; break
                 end
             end
-            seeds[y, x] = is_seed
+            seeds[y, x] = is_max
         end
     end
 
@@ -297,8 +293,8 @@ function compute_masks(dP::AbstractArray{T, 3}, cellprob::AbstractMatrix{T};
 
     # 🛠️ AGGRESSIVO: Rimuovi maschere > 1200px (sono quasi sicuramente fusioni)
     # Questo è il taglio netto per abbattere il conteggio da 3300 a 2500
-    println("   --> Removing giant masks (>2000px)...")
-    remove_giant_masks!(masks; max_size=2000) 
+    println("   --> Removing giant masks (>1800px)...")
+    remove_giant_masks!(masks; max_size=1800) 
 
     # 2. Renumera ID
     uniq = sort!(collect(Set(masks[masks .> 0])))
@@ -445,7 +441,7 @@ function segment(img::AbstractArray, model_path::String; use_gpu::Bool=false)
     # cellprob_threshold=-1.5 -> Massima copertura (recupera verde)
     # flow_threshold=0.0 -> Non cancellare per forma (evita buchi)
     # min_size=5 -> Accetta frammenti piccoli
-    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=-0.3, flow_threshold=0.0, min_size=20)
+    masks = compute_masks(dP_crop, cellprob_crop; niter=200, cellprob_threshold=-0.3, flow_threshold=0.0, min_size=25)
     
     println("dP range: ", extrema(dP_crop))
     println("cellprob range: ", extrema(cellprob_crop))
