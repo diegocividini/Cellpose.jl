@@ -177,6 +177,37 @@ path_tiff, path_png = save_masks("data/my_image.tif", masks, "results/output")
 
 ---
 
+### 🐛 Troubleshooting
+
+| Issue | Likely Cause | Solution |
+|-----------|------|---------|
+| `MethodError: no method matching Float32(::Matrix{Float32})` | Missing `.` in broadcasting (e.g., `Float32(arr)` vs `Float32.(arr)`) | Ensure all scalar conversions use broadcasting or are inside loops with explicit indexing. |
+| `ONNX model not found` | Incorrect path or missing `.onnx.data` file | Verify `model_path` points to the `.onnx` file; keep `.data` sibling file if present. |
+| `CUDA not functional` | Missing cuDNN or incompatible CUDA version | Run `using CUDA; CUDA.versioninfo()` to diagnose; ensure cuDNN is in library path. |
+| `Out of memory` | Large image + GPU + many tiles | Reduce image size, use CPU (use_gpu=false), or increase system RAM. |
+| `Too few cells detected` | Overly strict `min_size` or wrong `diameter` | Let `diameter=0.0` auto-estimate, or manually tune `min_size`/`max_size`. |
+| `Edge artifacts in masks` | Insufficient tile overlap | Do not modify `TILE_OVERLAP=0.1`; the flat-top window requires this value for correct blending. |
+
+---
+
+### ⚡ Performance Tips
+
+1. **Thread Count**: Set `JULIA_NUM_THREADS` before starting Julia:
+    ```bash
+    export JULIA_NUM_THREADS=8  # Linux/macOS
+    set JULIA_NUM_THREADS=8     # Windows CMD
+    ```
+    You can also automatically set the number of threads starting Julia with the flag: `-t auto`.
+2. **GPU vs CPU**:
+    * GPU: Faster for large images (>1024px) but requires data transfer overhead.
+    * CPU: More predictable memory usage; scales well with core count.
+3. **Memory Management**:
+    * For very large images (>4096px), consider pre-cropping regions of interest.
+    * The tiling system limits peak memory to ~3× tile size × channels.
+4. **Diameter Hint**: Providing an approximate diameter (even ±30%) improves speed and accuracy by reducing false positives in estimate_diameter.
+
+---
+
 ### 📜 Acknowledgments & Citation
 
 This is an independent port built for educational and research integration purposes. All credit for the original machine learning architecture, pretrained models, and algorithmic concepts goes to the original Cellpose authors.
