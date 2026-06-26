@@ -2,8 +2,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image # Assumendo che tu abbia Pillow installato
 
-mask_py = np.array(Image.open("/Users/diegocividini/Desktop/vm/maschera_wrapper.tif"))
-mask_jl = np.array(Image.open("/Users/diegocividini/Desktop/vm/maschera_native.tif"))
+mask_py = np.array(Image.open("/Users/diegocividini/Desktop/new_image/maschera_wrapper.tif"))
+mask_jl = np.array(Image.open("/Users/diegocividini/Desktop/new_image/maschera_native.tif"))
 
 py_bin = (mask_py > 0).astype(np.uint8)
 jl_bin = (mask_jl > 0).astype(np.uint8)
@@ -27,4 +27,4 @@ diff_map[agreement] = [0, 0, 255]      # BLUE = AGREEMENT (Both found a cell)
 diff_map[py_only]   = [0, 255, 0]      # GREEN = PYTHON ONLY
 diff_map[jl_only]   = [255, 0, 0]      # RED = JULIA ONLY
 
-plt.imsave('difference_map_presence.png', diff_map)
+plt.imsave('difference_map_presence_NEW.png', diff_map)
