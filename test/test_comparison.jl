@@ -3,9 +3,9 @@ using Images, Statistics, Printf, ColorTypes
 # ==============================================================================
 # PATHS
 # ==============================================================================
-PATH_PYTHON = "/Users/diegocividini/Desktop/vm/maschera_wrapper.tif"
-PATH_JULIA  = "/Users/diegocividini/Desktop/vm/maschera_native.tif"
-OUTPUT_DIFF = "/Users/diegocividini/Desktop/vm/differenze_map.png"
+PATH_PYTHON = "/Users/diegocividini/Desktop/new_image/maschera_wrapper.tif"
+PATH_JULIA  = "/Users/diegocividini/Desktop/new_image/maschera_native.tif"
+OUTPUT_DIFF = "./difference_map_NEW.png"
 
 # ==============================================================================
 # SUPPORT FUNCTIONS
