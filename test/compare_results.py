@@ -29,18 +29,20 @@ OUT_SUMMARY = Path(f"results/summary_{device}.txt")
 
 
 def compute_binary_metrics(mask_py, mask_jl):
-    """Calcola Binary IoU, Pixel Accuracy, F1 a livello pixel"""
+    """Calcola Binary IoU, Pixel Accuracy, F1 a livello pixel (senza dipendenze esterne)"""
     bin_py = (mask_py > 0).astype(np.uint8)
     bin_jl = (mask_jl > 0).astype(np.uint8)
 
-    # Binary IoU (Jaccard)
-    binary_iou = metrics.jaccard_score(bin_py.flatten(), bin_jl.flatten())
+    # Calcolo manuale di IoU (Jaccard Index)
+    intersection = np.logical_and(bin_py, bin_jl).sum()
+    union = np.logical_or(bin_py, bin_jl).sum()
+    binary_iou = intersection / union if union > 0 else 0.0
 
     # Pixel Accuracy
     pixel_acc = np.mean(bin_py == bin_jl)
 
     # Precision, Recall, F1
-    tp = np.logical_and(bin_py, bin_jl).sum()
+    tp = intersection
     fp = np.logical_and(bin_jl, ~bin_py).sum()
     fn = np.logical_and(bin_py, ~bin_jl).sum()
 
