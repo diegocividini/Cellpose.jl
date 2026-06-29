@@ -14,11 +14,14 @@ from skimage import io, metrics, measure
 import matplotlib.pyplot as plt
 
 # === CONFIGURAZIONE ===
-device = "cpu"  # Cambia in "gpu" quando farai il confronto della versione GPU
+device = "cpu"  # Cambia in "gpu" quando confronterai le versioni GPU
 PY_CSV = Path(f"results/results_python_{device}.csv")
 JL_CSV = Path(f"results/results_julia_{device}.csv")
-PY_MASKS_DIR = Path(f"masks_python_{device}")
-JL_MASKS_DIR = Path(f"masks_julia_{device}")
+
+# ️ ADATTA QUESTI PERCORSI AI TUOI FILE REALI:
+PY_MASKS_DIR = Path("masks_python")        # Verifica con `ls masks_*`
+JL_MASKS_DIR = Path("masks_julia_cpu")     # Verifica con `ls masks_*`
+
 OUT_FIGURES = Path(f"results/figures_comparison_{device}")
 OUT_TABLE_LATEX = Path(f"results/comparison_table_{device}.tex")
 OUT_SUMMARY = Path(f"results/summary_{device}.txt")
@@ -145,8 +148,18 @@ def main():
 
     for _, row in df.iterrows():
         fname = row["image"]
-        mask_py = io.imread(PY_MASKS_DIR / f"{Path(fname).stem}.png")
-        mask_jl = io.imread(JL_MASKS_DIR / f"{Path(fname).stem}.png")
+        base_name = Path(fname).stem
+
+        # Cerca il file con qualsiasi estensione (.png, .tif, .jpg)
+        py_mask_path = next(PY_MASKS_DIR.glob(f"{base_name}.*"), None)
+        jl_mask_path = next(JL_MASKS_DIR.glob(f"{base_name}.*"), None)
+
+        if py_mask_path is None or jl_mask_path is None:
+            print(f"⚠️ Skip {fname}: mask file not found")
+            continue
+
+        mask_py = io.imread(py_mask_path)
+        mask_jl = io.imread(jl_mask_path)
 
         if mask_py.shape != mask_jl.shape:
             print(
