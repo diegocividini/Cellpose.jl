@@ -14,13 +14,14 @@ from skimage import io, metrics, measure
 import matplotlib.pyplot as plt
 
 # === CONFIGURAZIONE ===
-PY_MASKS_DIR = Path("masks_python")
-JL_MASKS_DIR = Path("masks_julia")
-PY_CSV = Path("results/results_python.csv")
-JL_CSV = Path("results/results_julia.csv")
-OUT_FIGURES = Path("results/figures_comparison")
-OUT_TABLE_LATEX = Path("results/comparison_table.tex")
-OUT_SUMMARY = Path("results/summary.txt")
+device = "cpu"  # Cambia in "gpu" quando farai il confronto della versione GPU
+PY_CSV = Path(f"results/results_python_{device}.csv")
+JL_CSV = Path(f"results/results_julia_{device}.csv")
+PY_MASKS_DIR = Path(f"masks_python_{device}")
+JL_MASKS_DIR = Path(f"masks_julia_{device}")
+OUT_FIGURES = Path(f"results/figures_comparison_{device}")
+OUT_TABLE_LATEX = Path(f"results/comparison_table_{device}.tex")
+OUT_SUMMARY = Path(f"results/summary_{device}.txt")
 # =====================
 
 
