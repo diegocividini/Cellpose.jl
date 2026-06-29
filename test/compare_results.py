@@ -5,12 +5,13 @@ Genera:
   - Metriche di accordo (Binary IoU, Pixel Accuracy, F1)
   - Difference map visiva
   - Tabella LaTeX pronta per la tesi
+  - Diagnostica avanzata per identificare cause di divergenza
 """
 import os
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from skimage import io, metrics, measure
+from skimage import io
 import matplotlib.pyplot as plt
 
 # === CONFIGURAZIONE ===
@@ -18,9 +19,8 @@ device = "cpu"  # Cambia in "gpu" quando confronterai le versioni GPU
 PY_CSV = Path(f"results/results_python_{device}.csv")
 JL_CSV = Path(f"results/results_julia_{device}.csv")
 
-# ️ ADATTA QUESTI PERCORSI AI TUOI FILE REALI:
-PY_MASKS_DIR = Path("masks_python")        # Verifica con `ls masks_*`
-JL_MASKS_DIR = Path("masks_julia_cpu")     # Verifica con `ls masks_*`
+PY_MASKS_DIR = Path("masks_python")
+JL_MASKS_DIR = Path("masks_julia_cpu")
 
 OUT_FIGURES = Path(f"results/figures_comparison_{device}")
 OUT_TABLE_LATEX = Path(f"results/comparison_table_{device}.tex")
@@ -29,19 +29,14 @@ OUT_SUMMARY = Path(f"results/summary_{device}.txt")
 
 
 def compute_binary_metrics(mask_py, mask_jl):
-    """Calcola Binary IoU, Pixel Accuracy, F1 a livello pixel (senza dipendenze esterne)"""
     bin_py = (mask_py > 0).astype(np.uint8)
     bin_jl = (mask_jl > 0).astype(np.uint8)
 
-    # Calcolo manuale di IoU (Jaccard Index)
     intersection = np.logical_and(bin_py, bin_jl).sum()
     union = np.logical_or(bin_py, bin_jl).sum()
     binary_iou = intersection / union if union > 0 else 0.0
 
-    # Pixel Accuracy
     pixel_acc = np.mean(bin_py == bin_jl)
-
-    # Precision, Recall, F1
     tp = intersection
     fp = np.logical_and(bin_jl, ~bin_py).sum()
     fn = np.logical_and(bin_py, ~bin_jl).sum()
@@ -63,7 +58,6 @@ def compute_binary_metrics(mask_py, mask_jl):
 
 
 def compute_count_metrics(mask_py, mask_jl):
-    """Calcola discrepanza nel conteggio cellule"""
     n_py = len(np.unique(mask_py)) - 1
     n_jl = len(np.unique(mask_jl)) - 1
     diff = n_jl - n_py
@@ -77,7 +71,6 @@ def compute_count_metrics(mask_py, mask_jl):
 
 
 def generate_diff_map(mask_py, mask_jl, save_path):
-    """Genera difference map: Blue=Agreement, Green=Py-only, Red=Jl-only"""
     bin_py = (mask_py > 0).astype(bool)
     bin_jl = (mask_jl > 0).astype(bool)
 
@@ -85,11 +78,10 @@ def generate_diff_map(mask_py, mask_jl, save_path):
     py_only = bin_py & ~bin_jl
     jl_only = ~bin_py & bin_jl
 
-    # RGB: Blue=Agreement, Green=Py-only, Red=Jl-only, Black=Background
     diff = np.zeros((*mask_py.shape, 3), dtype=np.uint8)
-    diff[agreement] = [0, 0, 255]   # Blue
-    diff[py_only] = [0, 255, 0]   # Green
-    diff[jl_only] = [255, 0, 0]   # Red
+    diff[agreement] = [0, 0, 255]
+    diff[py_only] = [0, 255, 0]
+    diff[jl_only] = [255, 0, 0]
 
     plt.figure(figsize=(8, 8))
     plt.imshow(diff)
@@ -101,13 +93,10 @@ def generate_diff_map(mask_py, mask_jl, save_path):
 
 
 def generate_latex_table(df):
-    """Genera tabella LaTeX pronta per l'inclusione nella tesi"""
-    # Seleziona colonne rilevanti
     cols = ["image", "count_diff_pct", "binary_iou",
             "pixel_acc", "f1_score", "fp_pixels", "fn_pixels"]
     df_latex = df[cols].copy()
 
-    # Formattazione
     df_latex["binary_iou"] = df_latex["binary_iou"].apply(
         lambda x: f"{x*100:.2f}\\%")
     df_latex["pixel_acc"] = df_latex["pixel_acc"].apply(
@@ -116,7 +105,6 @@ def generate_latex_table(df):
     df_latex["count_diff_pct"] = df_latex["count_diff_pct"].apply(
         lambda x: f"{x:+.2f}\\%")
 
-    # Genera LaTeX
     latex = df_latex.to_latex(
         index=False,
         column_format="lrrrrrr",
@@ -124,8 +112,6 @@ def generate_latex_table(df):
         label="tab:py_jl_comparison",
         escape=False
     )
-
-    # Pulizia per compilazione LaTeX
     latex = latex.replace("\\_", "_").replace("\\%", "\\%")
     return latex
 
@@ -133,15 +119,12 @@ def generate_latex_table(df):
 def main():
     OUT_FIGURES.mkdir(parents=True, exist_ok=True)
 
-    # Carica CSV risultati
     if not PY_CSV.exists() or not JL_CSV.exists():
         print("❌ Errore: Esegui prima run_python.py e run_julia.jl per generare i CSV.")
         return
 
     df_py = pd.read_csv(PY_CSV)
     df_jl = pd.read_csv(JL_CSV)
-
-    # Merge per immagine
     df = pd.merge(df_py, df_jl, on="image",
                   suffixes=("_py", "_jl"), how="inner")
 
@@ -152,7 +135,6 @@ def main():
         fname = row["image"]
         base_name = Path(fname).stem
 
-        # Cerca il file con qualsiasi estensione (.png, .tif, .jpg)
         py_mask_path = next(PY_MASKS_DIR.glob(f"{base_name}.*"), None)
         jl_mask_path = next(JL_MASKS_DIR.glob(f"{base_name}.*"), None)
 
@@ -168,37 +150,80 @@ def main():
                 f"⚠️ Skip {fname}: shape mismatch {mask_py.shape} vs {mask_jl.shape}")
             continue
 
-        # Calcola metriche
         binary_metrics = compute_binary_metrics(mask_py, mask_jl)
         count_metrics = compute_count_metrics(mask_py, mask_jl)
 
-        # Unisci risultati
         result = {"image": fname, "shape": mask_py.shape}
         result.update(binary_metrics)
         result.update(count_metrics)
         results.append(result)
 
-        # Genera difference map per le prime 3 immagini (per risparmiare spazio)
         if diff_maps_generated < 3:
-            diff_path = OUT_FIGURES / f"diff_{Path(fname).stem}.png"
+            diff_path = OUT_FIGURES / f"diff_{base_name}.png"
             generate_diff_map(mask_py, mask_jl, diff_path)
-            print(f"🗺️ Difference map saved: {diff_path}")
             diff_maps_generated += 1
 
         print(
             f"✅ {fname}: IoU={binary_metrics['binary_iou']:.2%}, Δcount={count_metrics['count_diff_pct']:+.2f}%")
 
-    # Salva risultati completi
     df_results = pd.DataFrame(results)
+    if df_results.empty:
+        print("⚠️ Nessun risultato valido generato. Controlla percorsi e estensioni.")
+        return
+
     df_results.to_csv("results/full_comparison.csv", index=False)
 
-    # Genera tabella LaTeX
+    # === DIAGNOSTICA AVANZATA ===
+    print("\n" + "="*50)
+    print("🔍 DIAGNOSTICA: Analisi delle divergenze")
+    print("="*50)
+
+    # 1. Best/Worst IoU
+    best = df_results.nlargest(3, 'binary_iou')[
+        ['image', 'binary_iou', 'count_diff_pct']]
+    worst = df_results.nsmallest(3, 'binary_iou')[
+        ['image', 'binary_iou', 'count_diff_pct']]
+    print("\n📈 Top 3 immagini (IoU più alto):")
+    print(best.to_string(index=False))
+    print("\n📉 Bottom 3 immagini (IoU più basso):")
+    print(worst.to_string(index=False))
+
+    # 2. Correlazione conteggi
+    corr = df_results['count_py'].corr(df_results['count_jl'])
+    print(f"\n🔗 Correlazione Python/Julia cell counts: {corr:.3f}")
+    if corr < 0.90:
+        print("⚠️ ATTENZIONE: Correlazione bassa. Le due implementazioni rilevano pattern diversi.")
+    else:
+        print("✅ Buona correlazione lineare nei conteggi.")
+
+    # 3. Analisi FP/FN vs Area
+    mean_area_py = df_py['mean_area'].mean()
+    mean_area_jl = df_jl['mean_area'].mean()
+    print(
+        f"\n📏 Area media cellule: Python={mean_area_py:.1f}px² | Julia={mean_area_jl:.1f}px²")
+    if abs(mean_area_py - mean_area_jl) > mean_area_py * 0.15:
+        print("⚠️ Differenza significativa nelle aree medie → verificare soglie di merging o diametro.")
+    else:
+        print("✅ Aree medie coerenti.")
+
+    # 4. Suggerimenti automatici
+    print("\n💡 SUGGERIMENTI PER MIGLIORARE:")
+    if df_results['binary_iou'].std() > 0.20:
+        print("• Alta varianza IoU → testare soglie adaptive per immagini dense vs sparse.")
+    if df_results['count_diff_pct'].mean() < -10:
+        print("• Julia sottostima cellule → provare: cellprob_threshold=-0.2, flow_threshold=0.6")
+    if df_results['count_diff_pct'].mean() > 10:
+        print("• Julia sovrastima cellule → provare: cellprob_threshold=0.1, flow_threshold=0.2")
+    print("• Verificare che la normalizzazione 1-99 percentile usi lo stesso ordine di canali (RGB vs Grayscale).")
+    print("• Controllare che il modello ONNX esportato da Python sia identico a quello caricato in Julia.")
+    print("="*50 + "\n")
+
+    # Genera tabella LaTeX e summary
     latex_table = generate_latex_table(df_results)
     with open(OUT_TABLE_LATEX, "w") as f:
         f.write(latex_table)
     print(f"📄 Tabella LaTeX salvata in {OUT_TABLE_LATEX}")
 
-    # Genera summary testuale
     summary = f"""
 === BENCHMARK SUMMARY: Python vs Julia Cellpose ===
 Images compared: {len(df_results)}
@@ -212,7 +237,6 @@ Total False Negative Pixels: {df_results['fn_pixels'].sum():,}
     with open(OUT_SUMMARY, "w") as f:
         f.write(summary)
     print(summary)
-
     print(f"🎯 Confronto completato. Risultati in results/")
 
 
