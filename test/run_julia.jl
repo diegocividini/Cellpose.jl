@@ -11,7 +11,7 @@ if "--device" in ARGS
 end
 use_gpu = device == "gpu"
 
-# Carica CUDA solo se richiesto (evita errori se non installato quando usi CPU)
+# Carica CUDA solo se richiesto (evita errori se non è installato)
 if use_gpu
     using CUDA
 end
@@ -33,7 +33,7 @@ df = DataFrame(
 
 # 3. Loop sulle immagini
 for fname in readdir(IMG_DIR)
-    # FIX: Verifica l'estensione in modo compatibile con Julia
+    # Verifica estensione (metodo corretto in Julia)
     ext = splitext(fname)[2]
     if !(ext in (".png", ".jpg", ".tif", ".tiff"))
         continue
@@ -41,28 +41,27 @@ for fname in readdir(IMG_DIR)
 
     img_path = joinpath(IMG_DIR, fname)
 
-    # Sincronizzazione GPU (solo se usi GPU)
+    # Sincronizzazione GPU
     if use_gpu
         CUDA.synchronize()
     end
 
     t0 = time_ns()
     try
-        # Esecuzione segmentazione
+        # ✅ FIX: Passa solo gli argomenti supportati dall'API (use_gpu, diameter)
+        # Gli altri parametri (niter, soglie) sono gestiti internamente da Cellpose.jl
         masks = Cellpose.segment(img_path, MODEL_PATH;
-            use_gpu=use_gpu, diameter=0.0, cellprob_threshold=0.0,
-            flow_threshold=0.4, min_size=nothing, max_size=nothing, niter=200)
+            use_gpu=use_gpu, diameter=0.0)
 
         if use_gpu
             CUDA.synchronize()
         end
         elapsed = (time_ns() - t0) / 1e9
 
-        # Salva maschera (PNG o TIFF a seconda dell'estensione, qui forziamo PNG per semplicità)
-        out_fname = replace(fname, r"\.\w+$" => ".png")
-        save(joinpath(OUT_DIR, out_fname), masks)
+        # Salva la maschera (converti in UInt16 per preservare gli ID delle cellule)
+        out_fname = replace(fname, r"\.\w+$" => ".tif") # Salva come TIFF per supportare 16-bit
+        save(joinpath(OUT_DIR, out_fname), convert.(UInt16, masks))
 
-        # Calcolo metriche
         n_cells = maximum(masks)
         areas = n_cells > 0 ? [sum(masks .== i) for i in 1:n_cells] : Float64[]
 
@@ -81,7 +80,7 @@ end
 
 # 4. Salvataggio Risultati
 CSV.write(OUT_CSV, df)
-@info " Results saved to $OUT_CSV"
+@info "📊 Results saved to $OUT_CSV"
 if !isempty(df)
     @info "📈 Stats: $(round(mean(df.n_cells), digits=1)) ± $(round(std(df.n_cells), digits=1)) cells/image"
 end
